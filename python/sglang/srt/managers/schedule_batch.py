@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Copyright 2023-2024 SGLang Team
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,7 +19,7 @@ limitations under the License.
 
 import logging
 from dataclasses import dataclass
-from typing import List, Optional, Union
+from typing import TYPE_CHECKING, List, Optional, Union
 
 import torch
 
@@ -29,13 +31,17 @@ from sglang.srt.mem_cache.chunk_cache import ChunkCache
 from sglang.srt.mem_cache.memory_pool import BaseTokenToKVPool, ReqToTokenPool
 from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
 
+if TYPE_CHECKING:
+    from sglang.srt.layers.sampler import SampleOutput
+
+
 INIT_INCREMENTAL_DETOKENIZATION_OFFSET = 5
 
 # Put some global args for easy access
 global_server_args_dict = {
     "disable_flashinfer": False,
     "disable_flashinfer_sampling": False,
-    "attention_reduce_in_fp32": False,
+    "triton_attention_reduce_in_fp32": False,
     "enable_mla": False,
 }
 
@@ -121,8 +127,8 @@ class Req:
 
         # For vision input
         self.pixel_values = None
-        self.image_size = None
-        self.image_offset = None
+        self.image_sizes = None
+        self.image_offsets = None
         self.pad_value = None
 
         # Prefix info
@@ -172,19 +178,22 @@ class Req:
     def adjust_max_prefix_ids(self):
         self.fill_ids = self.origin_input_ids + self.output_ids
         input_len = len(self.fill_ids)
-        max_prefix_len = input_len
+
+        # FIXME: To work around some bugs in logprob computation, we need to ensure each
+        # request has at least one token. Later, we can relax this requirement and use `input_len`.
+        max_prefix_len = input_len - 1
 
         if self.sampling_params.max_new_tokens > 0:
             # Need at least one token to compute logits
             max_prefix_len = min(max_prefix_len, input_len - 1)
 
         if self.return_logprob:
-            max_prefix_len = min(max_prefix_len, self.logprob_start_len)
-
             if self.normalized_prompt_logprob is None:
                 # Need at least two tokens to compute normalized logprob
                 max_prefix_len = min(max_prefix_len, input_len - 2)
+            max_prefix_len = min(max_prefix_len, self.logprob_start_len)
 
+        max_prefix_len = max(max_prefix_len, 0)
         return self.fill_ids[:max_prefix_len]
 
     # Based on https://github.com/vllm-project/vllm/blob/7a64d24aad69e4d2548aa0bf528d9fe63428ab01/vllm/transformers_utils/detokenizer.py#L194-L313
@@ -262,7 +271,14 @@ class Req:
 
         all_text = self.origin_input_text + self.decoded_text + jump_forward_str
         all_ids = self.tokenizer.encode(all_text)
+        if not all_ids:
+            logger.warning("Encoded all_text resulted in empty all_ids")
+            return False
+
         prompt_tokens = len(self.origin_input_ids_unpadded)
+        if prompt_tokens > len(all_ids):
+            logger.warning("prompt_tokens is larger than encoded all_ids")
+            return False
 
         if all_ids[prompt_tokens - 1] != self.origin_input_ids_unpadded[-1]:
             # TODO(lsyin): fix token fusion
@@ -593,12 +609,12 @@ class ScheduleBatch:
                     if req.pixel_values is not None:
                         (
                             req.origin_input_ids,
-                            req.image_offset,
+                            req.image_offsets,
                         ) = model_runner.model.pad_input_ids(
                             req.origin_input_ids_unpadded,
                             req.pad_value,
-                            req.pixel_values.shape,
-                            req.image_size,
+                            req.pixel_values,
+                            req.image_sizes,
                         )
 
                     jump_forward_reqs.append(req)
@@ -671,11 +687,17 @@ class ScheduleBatch:
         self.top_logprobs_nums.extend(other.top_logprobs_nums)
         self.return_logprob = any(req.return_logprob for req in self.reqs)
 
-    def sample(self, logits: torch.Tensor):
-        from sglang.srt.layers.sampler import Sampler
+    def check_sample_results(self, sample_output: SampleOutput):
+        if not torch.all(sample_output.success):
+            probs = sample_output.probs
+            batch_next_token_ids = sample_output.batch_next_token_ids
+            logging.warning("Sampling failed, fallback to top_k=1 strategy")
+            probs = probs.masked_fill(torch.isnan(probs), 0.0)
+            argmax_ids = torch.argmax(probs, dim=-1)
+            batch_next_token_ids = torch.where(
+                sample_output.success, batch_next_token_ids, argmax_ids
+            )
+            sample_output.probs = probs
+            sample_output.batch_next_token_ids = batch_next_token_ids
 
-        sampler = Sampler()
-
-        batch_next_token_ids = sampler(logits, self.sampling_info)
-
-        return batch_next_token_ids
+        return sample_output.batch_next_token_ids

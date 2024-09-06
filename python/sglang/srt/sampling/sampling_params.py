@@ -34,11 +34,17 @@ class SamplingParams:
         frequency_penalty: float = 0.0,
         presence_penalty: float = 0.0,
         repetition_penalty: float = 1.0,
+        dry_multiplier: float = 0.0,
+        dry_base: float = 0.0,
+        dry_allowed_length: int = 2,
+        dry_penalty_last_n: int = 0,
+        dry_sequence_breakers: Optional[List[str]] = [],
         ignore_eos: bool = False,
         skip_special_tokens: bool = True,
         spaces_between_special_tokens: bool = True,
         regex: Optional[str] = None,
         n: int = 1,
+        json_schema: Optional[str] = None,
     ) -> None:
         self.temperature = temperature
         self.top_p = top_p
@@ -47,6 +53,11 @@ class SamplingParams:
         self.frequency_penalty = frequency_penalty
         self.presence_penalty = presence_penalty
         self.repetition_penalty = repetition_penalty
+        self.dry_multiplier=dry_multiplier
+        self.dry_base=dry_base
+        self.dry_allowed_length=dry_allowed_length
+        self.dry_penalty_last_n=dry_penalty_last_n
+        self.dry_sequence_breakers=dry_sequence_breakers
         self.stop_strs = stop
         self.stop_token_ids = {*stop_token_ids}
         self.max_new_tokens = max_new_tokens
@@ -56,6 +67,7 @@ class SamplingParams:
         self.spaces_between_special_tokens = spaces_between_special_tokens
         self.regex = regex
         self.n = n
+        self.json_schema = json_schema
 
         # Process some special cases
         if self.temperature < _SAMPLING_EPS:
@@ -106,6 +118,17 @@ class SamplingParams:
                     f"min_new_tokens must be in (0, max_new_tokens({self.max_new_tokens})], got "
                     f"{self.min_new_tokens}."
                 )
+        if self.dry_multiplier is not None and self.dry_multiplier > 0.0:
+            if self.dry_multiplier < 0:
+                raise ValueError(
+                    f"dry_multiplier must be at least 0, got {self.dry_multiplier}."
+                )
+            if self.dry_allowed_length < 0:
+                raise ValueError(
+                    f"dry_allowed_length must be at least 0, got {self.dry_allowed_length}."
+                )
+        if self.regex is not None and self.json_schema is not None:
+            raise ValueError("regex and json_schema cannot be both set.")
 
     def normalize(self, tokenizer):
         # Process stop strings
@@ -136,8 +159,14 @@ class SamplingParams:
             "temperature": self.temperature,
             "top_p": self.top_p,
             "top_k": self.top_k,
+            "min_p": self.min_p,
             "frequency_penalty": self.frequency_penalty,
             "presence_penalty": self.presence_penalty,
+            "dry_multiplier": self.dry_multiplier,
+            "dry_base": self.dry_base,
+            "dry_allowed_length": self.dry_allowed_length,
+            "dry_penalty_last_n": self.dry_penalty_last_n,
+            "dry_sequence_breakers": self.dry_sequence_breakers,
             "ignore_eos": self.ignore_eos,
             "regex": self.regex,
         }

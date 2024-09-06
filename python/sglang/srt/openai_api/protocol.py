@@ -161,11 +161,17 @@ class CompletionRequest(BaseModel):
 
     # Extra parameters for SRT backend only and will be ignored by OpenAI models.
     regex: Optional[str] = None
+    json_schema: Optional[str] = None
     ignore_eos: Optional[bool] = False
     min_tokens: Optional[int] = 0
     repetition_penalty: Optional[float] = 1.0
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
-
+    min_p: float = 0.0
+    dry_multiplier: float = 0.0
+    dry_base: float = 0.0
+    dry_allowed_length: int = 2
+    dry_penalty_last_n: int = 0
+    dry_sequence_breakers: Optional[List[str]] = []
 
 class CompletionResponseChoice(BaseModel):
     index: int
@@ -199,11 +205,6 @@ class CompletionStreamResponse(BaseModel):
     usage: Optional[UsageInfo] = None
 
 
-class ChatCompletionMessageGenericParam(BaseModel):
-    role: Literal["system", "assistant"]
-    content: str
-
-
 class ChatCompletionMessageContentTextPart(BaseModel):
     type: Literal["text"]
     text: str
@@ -222,6 +223,11 @@ class ChatCompletionMessageContentImagePart(BaseModel):
 ChatCompletionMessageContentPart = Union[
     ChatCompletionMessageContentTextPart, ChatCompletionMessageContentImagePart
 ]
+
+
+class ChatCompletionMessageGenericParam(BaseModel):
+    role: Literal["system", "assistant"]
+    content: Union[str, List[ChatCompletionMessageContentTextPart]]
 
 
 class ChatCompletionMessageUserParam(BaseModel):
@@ -262,10 +268,16 @@ class ChatCompletionRequest(BaseModel):
 
     # Extra parameters for SRT backend only and will be ignored by OpenAI models.
     regex: Optional[str] = None
+    json_schema: Optional[str] = None
     min_tokens: Optional[int] = 0
     repetition_penalty: Optional[float] = 1.0
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
-
+    min_p: float = 0.0
+    dry_multiplier: float = 0.0
+    dry_base: float = 0.0
+    dry_allowed_length: int = 2
+    dry_penalty_last_n: int = 0
+    dry_sequence_breakers: Optional[List[str]] = []
 
 class ChatMessage(BaseModel):
     role: Optional[str] = None

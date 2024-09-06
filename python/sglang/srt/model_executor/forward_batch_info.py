@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Copyright 2023-2024 SGLang Team
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,16 +18,19 @@ limitations under the License.
 """ModelRunner runs the forward passes of the models."""
 from dataclasses import dataclass
 from enum import IntEnum, auto
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, List
 
 import numpy as np
 import torch
+import triton
+import triton.language as tl
 
 from sglang.srt.managers.schedule_batch import ScheduleBatch
 from sglang.srt.mem_cache.memory_pool import BaseTokenToKVPool, ReqToTokenPool
 
 if TYPE_CHECKING:
     from sglang.srt.model_executor.model_runner import ModelRunner
+    from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
 
 
 class ForwardMode(IntEnum):
@@ -42,6 +47,7 @@ class InputMetadata:
     """Store all inforamtion of a forward pass."""
 
     forward_mode: ForwardMode
+    sampling_info: SamplingBatchInfo
     batch_size: int
     req_pool_indices: torch.Tensor
     seq_lens: torch.Tensor
@@ -58,6 +64,7 @@ class InputMetadata:
 
     # For extend
     extend_seq_lens: torch.Tensor = None
+    extend_prefix_lens: torch.Tensor = None
     extend_start_loc: torch.Tensor = None
     extend_no_prefix: bool = None
 
@@ -69,8 +76,8 @@ class InputMetadata:
 
     # For multimodal
     pixel_values: List[torch.Tensor] = None
-    image_sizes: List[List[int]] = None
-    image_offsets: List[int] = None
+    image_sizes: List[List[List[int]]] = None
+    image_offsets: List[List[int]] = None
 
     # Trition attention backend
     triton_max_seq_len: int = 0
@@ -87,15 +94,8 @@ class InputMetadata:
     def init_multimuldal_info(self, batch: ScheduleBatch):
         reqs = batch.reqs
         self.pixel_values = [r.pixel_values for r in reqs]
-        self.image_sizes = [r.image_size for r in reqs]
-        self.image_offsets = [
-            (
-                (r.image_offset - batch.prefix_lens_cpu[i])
-                if r.image_offset is not None
-                else 0
-            )
-            for i, r in enumerate(reqs)
-        ]
+        self.image_sizes = [r.image_sizes for r in reqs]
+        self.image_offsets = [r.image_offsets for r in reqs]
 
     def compute_positions(self, batch: ScheduleBatch):
         position_ids_offsets = batch.position_ids_offsets
@@ -148,6 +148,7 @@ class InputMetadata:
                 for i, r in enumerate(batch.reqs)
             ]
             self.extend_seq_lens = torch.tensor(extend_lens_cpu, device="cuda")
+            self.extend_prefix_lens = torch.tensor(batch.prefix_lens_cpu, device="cuda")
             self.extend_start_loc = torch.zeros_like(self.seq_lens)
             self.extend_start_loc[1:] = torch.cumsum(self.extend_seq_lens[:-1], dim=0)
             self.extend_no_prefix = all(l == 0 for l in batch.prefix_lens_cpu)
@@ -174,6 +175,7 @@ class InputMetadata:
     ):
         ret = cls(
             forward_mode=forward_mode,
+            sampling_info=batch.sampling_info,
             batch_size=batch.batch_size(),
             req_pool_indices=batch.req_pool_indices,
             seq_lens=batch.seq_lens,
@@ -183,6 +185,8 @@ class InputMetadata:
             return_logprob=batch.return_logprob,
             top_logprobs_nums=batch.top_logprobs_nums,
         )
+
+        ret.sampling_info.prepare_penalties()
 
         ret.compute_positions(batch)
 
@@ -233,10 +237,10 @@ class InputMetadata:
         prefix_lens_cpu,
         flashinfer_use_ragged,
     ):
-        if self.forward_mode != ForwardMode.DECODE:
-            prefix_lens = torch.tensor(prefix_lens_cpu, device="cuda")
-        else:
+        if self.forward_mode == ForwardMode.DECODE:
             prefix_lens = None
+        else:
+            prefix_lens = self.extend_prefix_lens
 
         update_flashinfer_indices(
             self.forward_mode,
@@ -258,6 +262,42 @@ class InputMetadata:
             model_runner.flashinfer_decode_wrapper,
             flashinfer_use_ragged,
         )
+
+
+@triton.jit
+def create_flashinfer_kv_indices_triton(
+    req_to_token_ptr,  # [max_batch, max_context_len]
+    req_pool_indices_ptr,
+    page_kernel_lens_ptr,
+    kv_indptr,
+    kv_start_idx,
+    max_context_len,
+    kv_indices_ptr,
+):
+    BLOCK_SIZE: tl.constexpr = 512
+    pid = tl.program_id(axis=0)
+    req_pool_index = tl.load(req_pool_indices_ptr + pid)
+    kv_indices_offset = tl.load(kv_indptr + pid)
+
+    kv_start = 0
+    kv_end = 0
+    if kv_start_idx:
+        kv_start = tl.load(kv_start_idx + pid).to(tl.int32)
+        kv_end = kv_start
+    kv_end += tl.load(page_kernel_lens_ptr + pid).to(tl.int32)
+
+    req_to_token_ptr += req_pool_index * max_context_len
+    kv_indices_ptr += kv_indices_offset
+
+    ld_offset = kv_start + tl.arange(0, BLOCK_SIZE)
+    st_offset = tl.arange(0, BLOCK_SIZE)
+    num_loop = tl.cdiv(kv_end - kv_start, BLOCK_SIZE)
+    for _ in range(num_loop):
+        mask = ld_offset < kv_end
+        data = tl.load(req_to_token_ptr + ld_offset, mask=mask)
+        tl.store(kv_indices_ptr + st_offset, data, mask=mask)
+        ld_offset += BLOCK_SIZE
+        st_offset += BLOCK_SIZE
 
 
 def update_flashinfer_indices(
@@ -283,17 +323,18 @@ def update_flashinfer_indices(
 
         kv_indptr = torch.zeros((batch_size + 1,), dtype=torch.int32, device="cuda")
         kv_indptr[1:] = torch.cumsum(paged_kernel_lens, dim=0)
-        req_pool_indices_cpu = req_pool_indices.cpu().numpy()
-        paged_kernel_lens_cpu = paged_kernel_lens.cpu().numpy()
-        kv_indices = torch.cat(
-            [
-                model_runner.req_to_token_pool.req_to_token[
-                    req_pool_indices_cpu[i], : paged_kernel_lens_cpu[i]
-                ]
-                for i in range(batch_size)
-            ],
-            dim=0,
-        ).contiguous()
+
+        kv_indices = torch.empty(kv_indptr[-1], dtype=torch.int32, device="cuda")
+        create_flashinfer_kv_indices_triton[(batch_size,)](
+            model_runner.req_to_token_pool.req_to_token,
+            req_pool_indices,
+            paged_kernel_lens,
+            kv_indptr,
+            None,
+            model_runner.req_to_token_pool.req_to_token.size(1),
+            kv_indices,
+        )
+
         kv_last_page_len = torch.ones((batch_size,), dtype=torch.int32, device="cuda")
 
         if forward_mode == ForwardMode.DECODE:
@@ -310,6 +351,8 @@ def update_flashinfer_indices(
                 num_kv_heads,
                 head_dim,
                 1,
+                data_type=model_runner.kv_cache_dtype,
+                q_data_type=model_runner.dtype,
             )
         else:
             # extend part
@@ -361,18 +404,17 @@ def update_flashinfer_indices(
 
             kv_indptr = torch.zeros((batch_size + 1,), dtype=torch.int32, device="cuda")
             kv_indptr[1:] = torch.cumsum(paged_kernel_lens, dim=0)
-            req_pool_indices_cpu = req_pool_indices.cpu().numpy()
-            paged_kernel_lens_cpu = paged_kernel_lens.cpu().numpy()
-            kv_indices = torch.cat(
-                [
-                    model_runner.req_to_token_pool.req_to_token[
-                        req_pool_indices_cpu[i],
-                        kv_start_idx[i] : kv_start_idx[i] + paged_kernel_lens_cpu[i],
-                    ]
-                    for i in range(batch_size)
-                ],
-                dim=0,
-            ).contiguous()
+
+            kv_indices = torch.empty(kv_indptr[-1], dtype=torch.int32, device="cuda")
+            create_flashinfer_kv_indices_triton[(batch_size,)](
+                model_runner.req_to_token_pool.req_to_token,
+                req_pool_indices,
+                paged_kernel_lens,
+                kv_indptr,
+                kv_start_idx,
+                model_runner.req_to_token_pool.req_to_token.size(1),
+                kv_indices,
+            )
 
             if forward_mode == ForwardMode.DECODE:
                 # CUDA graph uses different flashinfer_decode_wrapper
@@ -388,6 +430,8 @@ def update_flashinfer_indices(
                     num_kv_heads,
                     head_dim,
                     1,
+                    data_type=model_runner.kv_cache_dtype,
+                    q_data_type=model_runner.dtype,
                 )
             else:
                 # extend part
