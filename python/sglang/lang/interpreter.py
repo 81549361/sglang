@@ -678,6 +678,7 @@ class StreamExecutor:
             "return_text_in_logprobs",
             "dtype",
             "regex",
+            "json_schema",
         ]:
             value = getattr(sampling_params, item, None)
             if value is not None:
@@ -859,6 +860,8 @@ class ProgramState:
         return self.stream_executor.get_meta_info(name)
 
     def __iadd__(self, other):
+        if other is None:
+            raise ValueError("Tried to append None to state.")
         self.stream_executor.submit(other)
         return self
 

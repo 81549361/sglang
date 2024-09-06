@@ -1,4 +1,4 @@
-from typing import Iterable, Optional, Tuple
+from typing import Iterable, Tuple
 
 import torch
 from torch import nn
@@ -7,7 +7,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from sglang.srt.layers.pooler import EmbeddingPoolerOutput, Pooler, PoolingType
 from sglang.srt.model_executor.model_runner import InputMetadata
-from sglang.srt.models.llama2 import LlamaForCausalLM, LlamaModel
+from sglang.srt.models.llama import LlamaModel
 
 
 class LlamaEmbeddingModel(nn.Module):
@@ -16,7 +16,6 @@ class LlamaEmbeddingModel(nn.Module):
         config: LlamaConfig,
         quant_config=None,
         cache_config=None,
-        efficient_weight_load=False,
     ) -> None:
         super().__init__()
         self.model = LlamaModel(config, quant_config=quant_config)
@@ -57,14 +56,15 @@ class LlamaEmbeddingModel(nn.Module):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 return
+            if name.startswith("model.vision_tower") and name not in params_dict:
+                return
+
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if name.startswith("model.vision_tower") and name not in params_dict:
                     continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
@@ -73,8 +73,6 @@ class LlamaEmbeddingModel(nn.Module):
             else:
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
-                    return
-                if name.startswith("model.vision_tower") and name not in params_dict:
                     return
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
@@ -87,6 +85,8 @@ class LlamaEmbeddingModel(nn.Module):
             load_weights_per_param(name, loaded_weight)
 
 
-EntryClass = LlamaEmbeddingModel
-# compat: e5-mistral model.config class == MistralModel
-EntryClassRemapping = [("MistralModel", LlamaEmbeddingModel)]
+class MistralModel(LlamaEmbeddingModel):
+    pass
+
+
+EntryClass = [LlamaEmbeddingModel, MistralModel]

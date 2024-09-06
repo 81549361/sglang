@@ -184,13 +184,9 @@ if __name__ == "__main__":
 
     # Parse the arguments
     args = parser.parse_args()
-
     cur_port = args.port
-
     cur_chunk = args.chunk_idx
-
     num_chunks = args.num_chunks
-
     num_frames = args.num_frames
 
     if "34b" in args.model_path.lower():
@@ -201,20 +197,19 @@ if __name__ == "__main__":
         print("Invalid model path. Please specify a valid model path.")
         exit()
 
-    model_overide_args = {}
-
-    model_overide_args["mm_spatial_pool_stride"] = args.mm_spatial_pool_stride
-    model_overide_args["architectures"] = ["LlavaVidForCausalLM"]
-    model_overide_args["num_frames"] = args.num_frames
-    model_overide_args["model_type"] = "llava"
+    model_override_args = {}
+    model_override_args["mm_spatial_pool_stride"] = args.mm_spatial_pool_stride
+    model_override_args["architectures"] = ["LlavaVidForCausalLM"]
+    model_override_args["num_frames"] = args.num_frames
+    model_override_args["model_type"] = "llava"
 
     if "34b" in args.model_path.lower():
-        model_overide_args["image_token_index"] = 64002
+        model_override_args["image_token_index"] = 64002
 
     if args.num_frames == 32:
-        model_overide_args["rope_scaling"] = {"factor": 2.0, "type": "linear"}
-        model_overide_args["max_sequence_length"] = 4096 * 2
-        model_overide_args["tokenizer_model_max_length"] = 4096 * 2
+        model_override_args["rope_scaling"] = {"factor": 2.0, "type": "linear"}
+        model_override_args["max_sequence_length"] = 4096 * 2
+        model_override_args["tokenizer_model_max_length"] = 4096 * 2
     elif args.num_frames < 32:
         pass
     else:
@@ -228,14 +223,13 @@ if __name__ == "__main__":
         tokenizer_path=tokenizer_path,
         port=cur_port,
         additional_ports=[cur_port + 1, cur_port + 2, cur_port + 3, cur_port + 4],
-        model_overide_args=model_overide_args,
+        model_override_args=model_override_args,
         tp_size=1,
     )
     sgl.set_default_backend(runtime)
     print(f"chat template: {runtime.endpoint.chat_template.name}")
 
     # Run a single request
-    # try:
     print("\n========== single ==========\n")
     root = args.video_dir
     if os.path.isfile(root):
@@ -257,13 +251,10 @@ if __name__ == "__main__":
     )  # Calculate the average processing time
     print(f"Average processing time per video: {average_time:.2f} seconds")
     runtime.shutdown()
-    # except Exception as e:
-    #     print(e)
-    runtime.shutdown()
 
-    # # # Run a batch of requests
+    # # Run a batch of requests
     # print("\n========== batch ==========\n")
     # if not os.path.exists(args.save_dir):
     #     os.makedirs(args.save_dir)
-    # batch(args.video_dir,args.save_dir,cur_chunk, num_chunks, num_frames, num_chunks)
+    # batch(args.video_dir, args.save_dir, cur_chunk, num_chunks, num_frames, num_chunks)
     # runtime.shutdown()

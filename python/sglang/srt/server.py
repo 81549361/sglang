@@ -59,6 +59,7 @@ from sglang.srt.managers.tokenizer_manager import TokenizerManager
 from sglang.srt.openai_api.adapter import (
     load_chat_template_for_openai_api,
     v1_batches,
+    v1_cancel_batch,
     v1_chat_completions,
     v1_completions,
     v1_delete_file,
@@ -246,6 +247,12 @@ async def openai_v1_batches(raw_request: Request):
     return await v1_batches(tokenizer_manager, raw_request)
 
 
+@app.post("/v1/batches/{batch_id}/cancel")
+async def cancel_batches(batch_id: str):
+    # https://platform.openai.com/docs/api-reference/batch/cancel
+    return await v1_cancel_batch(tokenizer_manager, batch_id)
+
+
 @app.get("/v1/batches/{batch_id}")
 async def retrieve_batch(batch_id: str):
     return await v1_retrieve_batch(batch_id)
@@ -265,7 +272,7 @@ async def retrieve_file_content(file_id: str):
 
 def launch_server(
     server_args: ServerArgs,
-    model_overide_args: Optional[dict] = None,
+    model_override_args: Optional[dict] = None,
     pipe_finish_writer: Optional[mp.connection.Connection] = None,
 ):
     """Launch an HTTP server."""
@@ -310,7 +317,7 @@ def launch_server(
             tp_rank_range,
             server_args,
             ports[3],
-            model_overide_args,
+            model_override_args,
         )
 
         try:
@@ -321,20 +328,20 @@ def launch_server(
             return
 
     # Launch processes
-    tokenizer_manager = TokenizerManager(server_args, port_args, model_overide_args)
+    tokenizer_manager = TokenizerManager(server_args, port_args, model_override_args)
     if server_args.chat_template:
         load_chat_template_for_openai_api(tokenizer_manager, server_args.chat_template)
     pipe_controller_reader, pipe_controller_writer = mp.Pipe(duplex=False)
     pipe_detoken_reader, pipe_detoken_writer = mp.Pipe(duplex=False)
 
     if server_args.dp_size == 1:
-        start_process = start_controller_process_single
+        start_controller_process = start_controller_process_single
     else:
-        start_process = start_controller_process_multi
+        start_controller_process = start_controller_process_multi
 
     proc_controller = mp.Process(
-        target=start_process,
-        args=(server_args, port_args, pipe_controller_writer, model_overide_args),
+        target=start_controller_process,
+        args=(server_args, port_args, pipe_controller_writer, model_override_args),
     )
     proc_controller.start()
 
@@ -414,7 +421,7 @@ def _set_envs_and_config(server_args: ServerArgs):
     if not server_args.disable_flashinfer:
         assert_pkg_version(
             "flashinfer",
-            "0.1.5",
+            "0.1.6",
             "Please uninstall the old version and "
             "reinstall the latest version by following the instructions "
             "at https://docs.flashinfer.ai/installation.html.",
@@ -494,7 +501,7 @@ class Runtime:
     def __init__(
         self,
         log_level: str = "error",
-        model_overide_args: Optional[dict] = None,
+        model_override_args: Optional[dict] = None,
         *args,
         **kwargs,
     ):
@@ -518,7 +525,7 @@ class Runtime:
 
         proc = mp.Process(
             target=launch_server,
-            args=(self.server_args, model_overide_args, pipe_writer),
+            args=(self.server_args, model_override_args, pipe_writer),
         )
         proc.start()
         pipe_writer.close()

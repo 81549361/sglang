@@ -21,7 +21,7 @@ import importlib.resources
 import logging
 import pkgutil
 from functools import lru_cache
-from typing import Optional, Type
+from typing import Optional, Tuple, Type
 
 import torch
 import torch.nn as nn
@@ -44,13 +44,15 @@ from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import ModelRegistry
 
 from sglang.global_config import global_config
+from sglang.srt.layers.logits_processor import LogitsProcessorOutput
+from sglang.srt.layers.sampler import SampleOutput
 from sglang.srt.managers.schedule_batch import ScheduleBatch, global_server_args_dict
 from sglang.srt.mem_cache.memory_pool import (
     MHATokenToKVPool,
     MLATokenToKVPool,
     ReqToTokenPool,
 )
-from sglang.srt.model_config import AttentionArch
+from sglang.srt.model_config import AttentionArch, ModelConfig
 from sglang.srt.model_executor.forward_batch_info import ForwardMode, InputMetadata
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import (
@@ -69,7 +71,7 @@ logger = logging.getLogger(__name__)
 class ModelRunner:
     def __init__(
         self,
-        model_config,
+        model_config: ModelConfig,
         mem_fraction_static: float,
         gpu_id: int,
         tp_rank: int,
@@ -85,7 +87,9 @@ class ModelRunner:
         self.tp_size = tp_size
         self.nccl_port = nccl_port
         self.server_args = server_args
-        self.is_multimodal_model = is_multimodal_model(self.model_config)
+        self.is_multimodal_model = is_multimodal_model(
+            self.model_config.hf_config.architectures
+        )
         global_server_args_dict.update(
             {
                 "disable_flashinfer": server_args.disable_flashinfer,
@@ -94,6 +98,13 @@ class ModelRunner:
                 "enable_mla": server_args.enable_mla,
             }
         )
+
+        if self.is_multimodal_model:
+            logger.info(
+                "Automatically turn off --chunked-prefill-size and adjust --mem-fraction-static for multimodal models."
+            )
+            server_args.chunked_prefill_size = None
+            server_args.mem_fraction_static *= 0.95
 
         min_per_gpu_memory = self.init_torch_distributed()
         self.load_model()
@@ -151,6 +162,7 @@ class ModelRunner:
         return min_per_gpu_memory
 
     def load_model(self):
+        torch.set_num_threads(1)
         logger.info(
             f"Load weight begin. avail mem={get_available_gpu_memory(self.gpu_id):.2f} GB"
         )
@@ -159,6 +171,8 @@ class ModelRunner:
                 "Compute capability below sm80. Use float16 due to lack of bfloat16 support."
             )
             self.server_args.dtype = "float16"
+            if torch.cuda.get_device_capability()[1] < 5:
+                raise RuntimeError("SGLang only supports sm75 and above.")
 
         monkey_patch_vllm_dummy_weight_loader()
         self.device_config = DeviceConfig()
@@ -182,19 +196,18 @@ class ModelRunner:
             monkey_patch_vllm_qvk_linear_loader()
 
         self.dtype = self.vllm_model_config.dtype
-        if self.model_config.model_overide_args is not None:
+        if self.model_config.model_override_args is not None:
             self.vllm_model_config.hf_config.update(
-                self.model_config.model_overide_args
+                self.model_config.model_override_args
             )
 
         self.model = get_model(
             model_config=self.vllm_model_config,
-            device_config=self.device_config,
             load_config=self.load_config,
-            lora_config=None,
-            multimodal_config=None,
+            device_config=self.device_config,
             parallel_config=None,
             scheduler_config=None,
+            lora_config=None,
             cache_config=None,
         )
         self.sliding_window_size = (
@@ -336,13 +349,7 @@ class ModelRunner:
         if self.server_args.kv_cache_dtype == "auto":
             self.kv_cache_dtype = self.dtype
         elif self.server_args.kv_cache_dtype == "fp8_e5m2":
-            if self.server_args.disable_flashinfer or self.server_args.enable_mla:
-                logger.warning(
-                    "FP8 KV cache is not supported for Triton kernel now, using auto kv cache dtype"
-                )
-                self.kv_cache_dtype = self.dtype
-            else:
-                self.kv_cache_dtype = torch.float8_e5m2
+            self.kv_cache_dtype = torch.float8_e5m2
         else:
             raise ValueError(
                 f"Unsupported kv_cache_dtype: {self.server_args.kv_cache_dtype}."
@@ -506,15 +513,19 @@ class ModelRunner:
             raise Exception(
                 f"Capture cuda graph failed: {e}\n"
                 "Possible solutions:\n"
-                "1. disable torch compile by not using --enable-torch-compile\n"
-                "2. disable cuda graph by --disable-cuda-graph\n"
-                "3. set --mem-fraction-static to a smaller value\n"
+                "1. disable cuda graph by --disable-cuda-graph\n"
+                "2. set --mem-fraction-static to a smaller value\n"
+                "3. disable torch compile by not using --enable-torch-compile\n"
                 "Open an issue on GitHub https://github.com/sgl-project/sglang/issues/new/choose \n"
             )
 
     @torch.inference_mode()
     def forward_decode(self, batch: ScheduleBatch):
-        if self.cuda_graph_runner and self.cuda_graph_runner.can_run(len(batch.reqs)):
+        if (
+            self.cuda_graph_runner
+            and self.cuda_graph_runner.can_run(len(batch.reqs))
+            and batch.sampling_info.can_run_in_cuda_graph()
+        ):
             return self.cuda_graph_runner.replay(batch)
 
         input_metadata = InputMetadata.from_schedule_batch(
@@ -563,7 +574,9 @@ class ModelRunner:
             input_metadata.image_offsets,
         )
 
-    def forward(self, batch: ScheduleBatch, forward_mode: ForwardMode):
+    def forward(
+        self, batch: ScheduleBatch, forward_mode: ForwardMode
+    ) -> Tuple[SampleOutput, LogitsProcessorOutput]:
         if self.is_multimodal_model and forward_mode == ForwardMode.EXTEND:
             return self.forward_extend_multi_modal(batch)
         elif forward_mode == ForwardMode.DECODE:
@@ -594,16 +607,6 @@ def import_model_classes():
                     assert entry.__name__ not in model_arch_name_to_cls
                     model_arch_name_to_cls[entry.__name__] = entry
 
-            # compat: some models such as chatglm has incorrect class set in config.json
-            # usage: [ tuple("From_Entry_Class_Name": EntryClass), ]
-            if hasattr(module, "EntryClassRemapping") and isinstance(
-                module.EntryClassRemapping, list
-            ):
-                for remap in module.EntryClassRemapping:
-                    if isinstance(remap, tuple) and len(remap) == 2:
-                        assert remap[0] not in model_arch_name_to_cls
-                        model_arch_name_to_cls[remap[0]] = remap[1]
-
     return model_arch_name_to_cls
 
 
@@ -619,4 +622,4 @@ def load_model_cls_srt(model_arch: str) -> Optional[Type[nn.Module]]:
 
 
 # Monkey patch model loader
-setattr(ModelRegistry, "load_model_cls", load_model_cls_srt)
+setattr(ModelRegistry, "_try_load_model_cls", load_model_cls_srt)

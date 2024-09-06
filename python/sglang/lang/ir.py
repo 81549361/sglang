@@ -35,6 +35,7 @@ class SglSamplingParams:
     logprob_start_len: Optional[int] = (None,)
     top_logprobs_num: Optional[int] = (None,)
     return_text_in_logprobs: Optional[bool] = (None,)
+    json_schema: Optional[str] = None
 
     # for constrained generation, not included in to_xxx_kwargs
     dtype: Optional[str] = None
@@ -61,6 +62,7 @@ class SglSamplingParams:
             self.logprob_start_len,
             self.top_logprobs_num,
             self.return_text_in_logprobs,
+            self.json_schema,
         )
 
     def to_openai_kwargs(self):
@@ -154,6 +156,7 @@ class SglSamplingParams:
             "dry_sequence_breakers": self.dry_sequence_breakers,
             "ignore_eos": self.ignore_eos,
             "regex": self.regex,
+            "json_schema": self.json_schema,
         }
 
 
@@ -483,6 +486,7 @@ class SglGen(SglExpr):
         return_text_in_logprobs: Optional[bool] = None,
         dtype: Optional[type] = None,
         regex: Optional[str] = None,
+        json_schema: Optional[str] = None,
     ):
         """Call the model to generate. See the meaning of the arguments in docs/en/sampling_params.md"""
         super().__init__()
@@ -509,6 +513,7 @@ class SglGen(SglExpr):
             return_text_in_logprobs=return_text_in_logprobs,
             dtype=dtype,
             regex=regex,
+            json_schema=json_schema,
         )
 
     def __repr__(self):
