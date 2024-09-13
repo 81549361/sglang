@@ -29,6 +29,7 @@ import torch.distributed
 import torch.distributed as dist
 
 from sglang.global_config import global_config
+from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.constrained.fsm_cache import FSMCache
 from sglang.srt.constrained.jump_forward import JumpForwardCache
 from sglang.srt.hf_transformers_utils import get_processor, get_tokenizer
@@ -52,8 +53,6 @@ from sglang.srt.managers.schedule_batch import (
 )
 from sglang.srt.mem_cache.chunk_cache import ChunkCache
 from sglang.srt.mem_cache.radix_cache import RadixCache
-from sglang.srt.model_config import ModelConfig
-from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.model_executor.model_runner import ModelRunner
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import (
@@ -88,6 +87,8 @@ class ModelTpServer:
         self.dp_size = server_args.dp_size
         self.schedule_policy = server_args.schedule_policy
         self.disable_regex_jump_forward = server_args.disable_regex_jump_forward
+        self.lora_paths = server_args.lora_paths
+        self.max_loras_per_batch = server_args.max_loras_per_batch
 
         # Init model and tokenizer
         self.model_config = ModelConfig(
@@ -129,7 +130,7 @@ class ModelTpServer:
                 if server_args.max_running_requests is None
                 else server_args.max_running_requests
             ),
-            self.model_runner.req_to_token_pool.size - 1,
+            self.model_runner.req_to_token_pool.size,
         )
         self.max_req_input_len = min(
             self.model_config.context_len - 1,
@@ -324,7 +325,15 @@ class ModelTpServer:
         self,
         recv_req: TokenizedGenerateReqInput,
     ):
-        req = Req(recv_req.rid, recv_req.input_text, recv_req.input_ids)
+        if isinstance(recv_req, TokenizedGenerateReqInput):
+            req = Req(
+                recv_req.rid,
+                recv_req.input_text,
+                recv_req.input_ids,
+                lora_path=recv_req.lora_path,
+            )
+        else:
+            req = Req(recv_req.rid, recv_req.input_text, recv_req.input_ids)
         req.tokenizer = self.tokenizer
         req.sampling_params = recv_req.sampling_params
         req.pixel_values = recv_req.pixel_values
@@ -443,10 +452,27 @@ class ModelTpServer:
                 self.current_inflight_req
             )
 
+        if self.lora_paths is not None:
+            lora_set = (
+                set([req.lora_path for req in self.running_batch.reqs])
+                if self.running_batch is not None
+                else set([])
+            )
+
         for req in self.waiting_queue:
             if adder.no_remaining_tokens():
                 break
             req.init_next_round_input(None if prefix_computed else self.tree_cache)
+            if (
+                self.lora_paths is not None
+                and len(
+                    lora_set
+                    | set([req.lora_path for req in adder.can_run_list])
+                    | set([req.lora_path])
+                )
+                > self.max_loras_per_batch
+            ):
+                break
             res = adder.add_one_req(req)
             if (
                 not res
@@ -521,9 +547,7 @@ class ModelTpServer:
         if self.model_runner.is_generation:
             # Forward and sample the next tokens
             if batch.extend_num_tokens != 0:
-                sample_output, logits_output = self.model_runner.forward(
-                    batch, ForwardMode.EXTEND
-                )
+                sample_output, logits_output = self.model_runner.forward(batch)
                 next_token_ids = batch.check_sample_results(sample_output)
                 batch.sampling_info.penalizer_orchestrator.cumulate_output_tokens(
                     next_token_ids
@@ -588,7 +612,7 @@ class ModelTpServer:
                     pt += req.extend_input_len
         else:
             assert batch.extend_num_tokens != 0
-            logits_output = self.model_runner.forward(batch, ForwardMode.EXTEND)
+            logits_output = self.model_runner.forward(batch)
             embeddings = logits_output.embeddings.tolist()
 
             # Check finish conditions
@@ -699,9 +723,7 @@ class ModelTpServer:
         batch.prepare_for_decode()
 
         # Forward and sample the next tokens
-        sample_output, logits_output = self.model_runner.forward(
-            batch, ForwardMode.DECODE
-        )
+        sample_output, logits_output = self.model_runner.forward(batch)
         next_token_ids = batch.check_sample_results(sample_output)
         batch.sampling_info.penalizer_orchestrator.cumulate_output_tokens(
             next_token_ids
@@ -791,7 +813,11 @@ class ModelTpServer:
                         "prompt_tokens": len(req.origin_input_ids),
                         "completion_tokens": len(req.output_ids),
                         "completion_tokens_wo_jump_forward": req.completion_tokens_wo_jump_forward,
-                        "finish_reason": str(req.finished_reason),
+                        "finish_reason": (
+                            req.finished_reason.to_json()
+                            if req.finished_reason is not None
+                            else None
+                        ),
                     }
                     if req.return_logprob:
                         (

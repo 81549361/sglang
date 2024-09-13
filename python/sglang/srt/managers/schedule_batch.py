@@ -29,7 +29,9 @@ from sglang.srt.constrained.jump_forward import JumpForwardMap
 from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache
 from sglang.srt.mem_cache.chunk_cache import ChunkCache
 from sglang.srt.mem_cache.memory_pool import BaseTokenToKVPool, ReqToTokenPool
+from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
+from sglang.srt.server_args import ServerArgs
 
 if TYPE_CHECKING:
     from sglang.srt.layers.sampler import SampleOutput
@@ -39,10 +41,11 @@ INIT_INCREMENTAL_DETOKENIZATION_OFFSET = 5
 
 # Put some global args for easy access
 global_server_args_dict = {
-    "disable_flashinfer": False,
-    "disable_flashinfer_sampling": False,
-    "triton_attention_reduce_in_fp32": False,
-    "enable_mla": False,
+    "attention_backend": ServerArgs.attention_backend,
+    "sampling_backend": ServerArgs.sampling_backend,
+    "triton_attention_reduce_in_fp32": ServerArgs.triton_attention_reduce_in_fp32,
+    "enable_mla": ServerArgs.enable_mla,
+    "torchao_config": ServerArgs.torchao_config,
 }
 
 
@@ -53,7 +56,7 @@ class BaseFinishReason:
     def __init__(self, is_error: bool = False):
         self.is_error = is_error
 
-    def __str__(self):
+    def to_json(self):
         raise NotImplementedError("Subclasses must implement this method")
 
 
@@ -62,17 +65,11 @@ class FINISH_MATCHED_TOKEN(BaseFinishReason):
         super().__init__()
         self.matched = matched
 
-    def __str__(self) -> str:
-        return f"FINISH_MATCHED_TOKEN: {self.matched}"
-
-
-class FINISH_LENGTH(BaseFinishReason):
-    def __init__(self, length: int):
-        super().__init__()
-        self.length = length
-
-    def __str__(self) -> str:
-        return f"FINISH_LENGTH: {self.length}"
+    def to_json(self):
+        return {
+            "type": "stop",  # to match OpenAI API's return value
+            "matched": self.matched,
+        }
 
 
 class FINISH_MATCHED_STR(BaseFinishReason):
@@ -80,22 +77,39 @@ class FINISH_MATCHED_STR(BaseFinishReason):
         super().__init__()
         self.matched = matched
 
-    def __str__(self) -> str:
-        return f"FINISH_MATCHED_STR: {self.matched}"
+    def to_json(self):
+        return {
+            "type": "stop",  # to match OpenAI API's return value
+            "matched": self.matched,
+        }
+
+
+class FINISH_LENGTH(BaseFinishReason):
+    def __init__(self, length: int):
+        super().__init__()
+        self.length = length
+
+    def to_json(self):
+        return {
+            "type": "length",  # to match OpenAI API's return value
+            "length": self.length,
+        }
 
 
 class FINISH_ABORT(BaseFinishReason):
     def __init__(self):
         super().__init__(is_error=True)
 
-    def __str__(self) -> str:
-        return "FINISH_ABORT"
+    def to_json(self):
+        return {
+            "type": "abort",
+        }
 
 
 class Req:
     """Store all inforamtion of a request."""
 
-    def __init__(self, rid, origin_input_text, origin_input_ids):
+    def __init__(self, rid, origin_input_text, origin_input_ids, lora_path=None):
         # Input and output info
         self.rid = rid
         self.origin_input_text = origin_input_text
@@ -103,6 +117,7 @@ class Req:
         self.origin_input_ids = origin_input_ids
         self.output_ids = []  # Each decode stage's output ids
         self.fill_ids = None  # fill_ids = origin_input_ids + output_ids
+        self.lora_path = lora_path
 
         # Memory info
         self.req_pool_idx = None
@@ -334,6 +349,8 @@ class ScheduleBatch:
     token_to_kv_pool: BaseTokenToKVPool
     tree_cache: BasePrefixCache
 
+    forward_mode: ForwardMode = None
+
     # Batched arguments to model runner
     input_ids: torch.Tensor = None
     req_pool_indices: torch.Tensor = None
@@ -344,6 +361,7 @@ class ScheduleBatch:
 
     # For mixed chunekd prefill
     prefix_lens_cpu: List[int] = None
+    running_bs: int = None
 
     # For processing logprobs
     return_logprob: bool = False
@@ -362,7 +380,7 @@ class ScheduleBatch:
         )
 
     def batch_size(self):
-        return len(self.reqs) if self.reqs is not None else 0
+        return len(self.reqs) if self.reqs else 0
 
     def is_empty(self):
         return len(self.reqs) == 0
@@ -397,6 +415,8 @@ class ScheduleBatch:
         return out_cache_loc
 
     def prepare_for_extend(self, vocab_size: int):
+        self.forward_mode = ForwardMode.EXTEND
+
         bs = self.batch_size()
         reqs = self.reqs
         input_ids = [r.fill_ids[len(r.prefix_indices) :] for r in reqs]
@@ -439,6 +459,9 @@ class ScheduleBatch:
         self.sampling_info = SamplingBatchInfo.from_schedule_batch(self, vocab_size)
 
     def mix_with_running(self, running_batch: "ScheduleBatch"):
+        self.forward_mode = ForwardMode.MIXED
+        self.running_bs = running_batch.batch_size()
+
         # NOTE: prefix_indices is what has been cached, but we don't cache each decode step
         prefix_lens_cpu = [len(r.prefix_indices) for r in self.reqs]
         prefix_lens_cpu.extend(
@@ -626,6 +649,8 @@ class ScheduleBatch:
         return jump_forward_reqs
 
     def prepare_for_decode(self, input_ids=None):
+        self.forward_mode = ForwardMode.DECODE
+
         if input_ids is None:
             input_ids = [
                 r.output_ids[-1] if r.output_ids else r.origin_input_ids[-1]
@@ -644,8 +669,6 @@ class ScheduleBatch:
         self.req_to_token_pool.req_to_token[
             self.req_pool_indices, self.seq_lens - 1
         ] = self.out_cache_loc
-
-        self.sampling_info.update_regex_vocab_mask(self)
 
     def filter_batch(self, unfinished_indices: List[int]):
         if unfinished_indices is None or len(unfinished_indices) == 0:

@@ -28,6 +28,13 @@ from fastapi import HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
 
+try:
+    from outlines.fsm.json_schema import convert_json_schema_to_str
+except ImportError:
+    # Before outlines 0.0.47, convert_json_schema_to_str is under
+    # outlines.integrations.utils
+    from outlines.integrations.utils import convert_json_schema_to_str
+
 from sglang.srt.conversation import (
     Conversation,
     SeparatorStyle,
@@ -86,19 +93,6 @@ file_id_storage: Dict[str, str] = {}
 
 # backend storage directory
 storage_dir = None
-
-
-def format_finish_reason(finish_reason) -> Optional[str]:
-    if finish_reason.startswith("None"):
-        return None
-    elif finish_reason.startswith("FINISH_MATCHED"):
-        return "stop"
-    elif finish_reason.startswith("FINISH_LENGTH"):
-        return "length"
-    elif finish_reason.startswith("FINISH_ABORT"):
-        return "abort"
-    else:
-        return "unknown"
 
 
 def create_error_response(
@@ -617,8 +611,10 @@ def v1_generate_response(request, ret, tokenizer_manager, to_file=False):
                 "index": 0,
                 "text": text,
                 "logprobs": logprobs,
-                "finish_reason": format_finish_reason(
-                    ret_item["meta_info"]["finish_reason"]
+                "finish_reason": (
+                    ret_item["meta_info"]["finish_reason"]["type"]
+                    if ret_item["meta_info"]["finish_reason"]
+                    else ""
                 ),
             }
         else:
@@ -626,8 +622,10 @@ def v1_generate_response(request, ret, tokenizer_manager, to_file=False):
                 index=idx,
                 text=text,
                 logprobs=logprobs,
-                finish_reason=format_finish_reason(
-                    ret_item["meta_info"]["finish_reason"]
+                finish_reason=(
+                    ret_item["meta_info"]["finish_reason"]["type"]
+                    if ret_item["meta_info"]["finish_reason"]
+                    else ""
                 ),
             )
 
@@ -761,8 +759,10 @@ async def v1_completions(tokenizer_manager, raw_request: Request):
                         index=index,
                         text=delta,
                         logprobs=logprobs,
-                        finish_reason=format_finish_reason(
-                            content["meta_info"]["finish_reason"]
+                        finish_reason=(
+                            content["meta_info"]["finish_reason"]["type"]
+                            if content["meta_info"]["finish_reason"]
+                            else ""
                         ),
                     )
                     chunk = CompletionStreamResponse(
@@ -894,28 +894,32 @@ def v1_chat_generate_request(
         return_logprobs.append(request.logprobs)
         logprob_start_lens.append(-1)
         top_logprobs_nums.append(request.top_logprobs)
-        sampling_params_list.append(
-            {
-                "temperature": request.temperature,
-                "max_new_tokens": request.max_tokens,
-                "min_new_tokens": request.min_tokens,
-                "stop": stop,
-                "stop_token_ids": request.stop_token_ids,
-                "top_p": request.top_p,
-                "min_p": request.min_p,
-                "presence_penalty": request.presence_penalty,
-                "frequency_penalty": request.frequency_penalty,
-                "repetition_penalty": request.repetition_penalty,
-                "dry_multiplier": request.dry_multiplier,
-                "dry_base": request.dry_base,
-                "dry_allowed_length": request.dry_allowed_length,
-                "dry_penalty_last_n": request.dry_penalty_last_n,
-                "dry_sequence_breakers": request.dry_sequence_breakers,
-                "regex": request.regex,
-                "json_schema": request.json_schema,
-                "n": request.n,
-            }
-        )
+
+        sampling_params = {
+            "temperature": request.temperature,
+            "max_new_tokens": request.max_tokens,
+            "min_new_tokens": request.min_tokens,
+            "stop": stop,
+            "stop_token_ids": request.stop_token_ids,
+            "top_p": request.top_p,
+            "min_p": request.min_p,
+            "presence_penalty": request.presence_penalty,
+            "frequency_penalty": request.frequency_penalty,
+            "repetition_penalty": request.repetition_penalty,
+            "dry_multiplier": request.dry_multiplier,
+            "dry_base": request.dry_base,
+            "dry_allowed_length": request.dry_allowed_length,
+            "dry_penalty_last_n": request.dry_penalty_last_n,
+            "dry_sequence_breakers": request.dry_sequence_breakers,
+            "regex": request.regex,
+            "n": request.n,
+        }
+        if request.response_format and request.response_format.type == "json_schema":
+            sampling_params["json_schema"] = convert_json_schema_to_str(
+                request.response_format.json_schema.schema_
+            )
+        sampling_params_list.append(sampling_params)
+
         image_data_list.append(image_data)
         modalities_list.extend(modalities)
     if len(all_requests) == 1:
@@ -1000,8 +1004,10 @@ def v1_chat_generate_response(request, ret, to_file=False):
                 "index": 0,
                 "message": {"role": "assistant", "content": ret_item["text"]},
                 "logprobs": choice_logprobs,
-                "finish_reason": format_finish_reason(
-                    ret_item["meta_info"]["finish_reason"]
+                "finish_reason": (
+                    ret_item["meta_info"]["finish_reason"]["type"]
+                    if ret_item["meta_info"]["finish_reason"]
+                    else ""
                 ),
             }
         else:
@@ -1009,8 +1015,10 @@ def v1_chat_generate_response(request, ret, to_file=False):
                 index=idx,
                 message=ChatMessage(role="assistant", content=ret_item["text"]),
                 logprobs=choice_logprobs,
-                finish_reason=format_finish_reason(
-                    ret_item["meta_info"]["finish_reason"]
+                finish_reason=(
+                    ret_item["meta_info"]["finish_reason"]["type"]
+                    if ret_item["meta_info"]["finish_reason"]
+                    else ""
                 ),
             )
 
@@ -1135,8 +1143,10 @@ async def v1_chat_completions(tokenizer_manager, raw_request: Request):
                         choice_data = ChatCompletionResponseStreamChoice(
                             index=index,
                             delta=DeltaMessage(role="assistant"),
-                            finish_reason=format_finish_reason(
-                                content["meta_info"]["finish_reason"]
+                            finish_reason=(
+                                content["meta_info"]["finish_reason"]["type"]
+                                if content["meta_info"]["finish_reason"]
+                                else ""
                             ),
                             logprobs=choice_logprobs,
                         )
@@ -1153,8 +1163,10 @@ async def v1_chat_completions(tokenizer_manager, raw_request: Request):
                     choice_data = ChatCompletionResponseStreamChoice(
                         index=index,
                         delta=DeltaMessage(content=delta),
-                        finish_reason=format_finish_reason(
-                            content["meta_info"]["finish_reason"]
+                        finish_reason=(
+                            content["meta_info"]["finish_reason"]["type"]
+                            if content["meta_info"]["finish_reason"]
+                            else ""
                         ),
                         logprobs=choice_logprobs,
                     )
