@@ -19,7 +19,6 @@ import math
 from typing import Any, Dict, Iterable, Optional, Tuple
 
 import torch
-from flashinfer import bmm_fp8
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.config import CacheConfig
@@ -30,7 +29,6 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -41,10 +39,15 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from sglang.srt.layers.activation import SiluAndMul
 from sglang.srt.layers.layernorm import RMSNorm
 from sglang.srt.layers.logits_processor import LogitsProcessor
+from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.radix_attention import RadixAttention
-from sglang.srt.layers.sampler import Sampler
 from sglang.srt.managers.schedule_batch import global_server_args_dict
-from sglang.srt.model_executor.forward_batch_info import InputMetadata
+from sglang.srt.model_executor.forward_batch_info import ForwardBatch
+from sglang.srt.utils import is_hip
+
+# ROCm: flashinfer available later
+if not is_hip():
+    from flashinfer import bmm_fp8
 
 
 class MiniCPM3MLP(nn.Module):
@@ -190,7 +193,7 @@ class MiniCPM3Attention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        input_metadata: InputMetadata,
+        forward_batch: ForwardBatch,
     ) -> torch.Tensor:
         if self.q_lora_rank is not None:
             q = self.q_a_proj(hidden_states)[0]
@@ -227,7 +230,7 @@ class MiniCPM3Attention(nn.Module):
         v = torch.nn.functional.pad(v, [0, 128 - self.v_head_dim], value=0).view(
             -1, self.num_local_heads * 128
         )
-        attn_output = self.attn(q, k, v, input_metadata)
+        attn_output = self.attn(q, k, v, forward_batch)
         attn_output = attn_output.view(-1, self.num_local_heads, 128)[
             ..., : self.v_head_dim
         ].reshape(-1, self.num_local_heads * self.v_head_dim)
@@ -338,7 +341,7 @@ class MiniCPM3AttentionMLA(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        input_metadata: InputMetadata,
+        forward_batch: ForwardBatch,
     ) -> torch.Tensor:
         q_len = hidden_states.shape[0]
         q_input = hidden_states.new_empty(
@@ -380,7 +383,7 @@ class MiniCPM3AttentionMLA(nn.Module):
         q_input[..., self.kv_lora_rank :] = q_pe
         k_input[..., self.kv_lora_rank :] = k_pe
 
-        attn_output = self.attn(q_input, k_input, v_input, input_metadata)
+        attn_output = self.attn(q_input, k_input, v_input, forward_batch)
         attn_output = attn_output.view(-1, self.num_local_heads, self.kv_lora_rank)
 
         if self.w_vc.dtype == torch.float8_e4m3fn:
@@ -416,7 +419,7 @@ class MiniCPM3DecoderLayer(nn.Module):
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
-        if global_server_args_dict["enable_mla"]:
+        if not global_server_args_dict["disable_mla"]:
             self.self_attn = MiniCPM3AttentionMLA(
                 config=config,
                 hidden_size=self.hidden_size,
@@ -469,7 +472,7 @@ class MiniCPM3DecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        input_metadata: InputMetadata,
+        forward_batch: ForwardBatch,
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
@@ -478,7 +481,7 @@ class MiniCPM3DecoderLayer(nn.Module):
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
-            input_metadata=input_metadata,
+            forward_batch=forward_batch,
         )
         hidden_states = residual + hidden_states * (
             self.config.scale_depth / math.sqrt(self.config.num_hidden_layers)
@@ -525,7 +528,7 @@ class MiniCPM3Model(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        input_metadata: InputMetadata,
+        forward_batch: ForwardBatch,
         input_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
         if input_embeds is None:
@@ -539,7 +542,7 @@ class MiniCPM3Model(nn.Module):
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
-                input_metadata,
+                forward_batch,
                 residual,
             )
         hidden_states = self.norm(hidden_states)
@@ -572,29 +575,26 @@ class MiniCPM3ForCausalLM(nn.Module):
         self.scale_width = self.config.hidden_size / self.config.dim_model_base
 
         self.logits_processor = LogitsProcessor(config)
-        self.sampler = Sampler()
 
     @torch.no_grad()
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        input_metadata: InputMetadata,
+        forward_batch: ForwardBatch,
         input_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
         if input_embeds is not None:
             input_embeds = input_embeds * self.config.scale_emb
-        hidden_states = self.model(input_ids, positions, input_metadata, input_embeds)
+        hidden_states = self.model(input_ids, positions, forward_batch, input_embeds)
         hidden_states = hidden_states / self.scale_width
         if self.config.tie_word_embeddings:
             lm_head_weight = self.model.embed_tokens.weight
         else:
             lm_head_weight = self.lm_head.weight
-        logits_output = self.logits_processor(
-            input_ids, hidden_states, lm_head_weight, input_metadata
+        return self.logits_processor(
+            input_ids, hidden_states, lm_head_weight, forward_batch
         )
-        sample_output = self.sampler(logits_output, input_metadata.sampling_info)
-        return sample_output, logits_output
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
@@ -653,7 +653,7 @@ class MiniCPM3ForCausalLM(nn.Module):
                     )
                     weight_loader(param, loaded_weight)
 
-        if global_server_args_dict["enable_mla"]:
+        if not global_server_args_dict["disable_mla"]:
             for layer_id in range(self.config.num_hidden_layers):
                 self_attn = self.model.layers[layer_id].self_attn
                 w_kc, w_vc = self_attn.kv_b_proj.weight.unflatten(
