@@ -144,7 +144,7 @@ class ImageInputs:
         ]
         ret.image_sizes = obj["image_sizes"]
         # Only when pixel values is not None we have modalities
-        ret.modalities = obj["modalities"]
+        ret.modalities = obj["modalities"] or ["image"]
         return ret
 
 
@@ -514,9 +514,10 @@ class ScheduleBatch:
             pt += req.extend_input_len
 
         # Set fields
-        self.input_ids = sum(input_ids, [])
-        self.req_pool_indices = torch.tensor(req_pool_indices, device="cuda")
-        self.seq_lens = torch.tensor(seq_lens, device="cuda")
+        with out_cache_loc.device:
+            self.input_ids = torch.tensor(sum(input_ids, []), dtype=torch.int32)
+            self.req_pool_indices = torch.tensor(req_pool_indices)
+            self.seq_lens = torch.tensor(seq_lens)
 
         self.extend_num_tokens = extend_num_tokens
         self.out_cache_loc = out_cache_loc
@@ -536,7 +537,7 @@ class ScheduleBatch:
             req.fill_ids = req.origin_input_ids + req.output_ids
             req.extend_input_len = 1
 
-        input_ids = self.input_ids + running_batch.input_ids
+        input_ids = torch.cat([self.input_ids, running_batch.input_ids])
         out_cache_loc = torch.cat([self.out_cache_loc, running_batch.out_cache_loc])
         extend_num_tokens = self.extend_num_tokens + running_bs
 
@@ -722,7 +723,9 @@ class ScheduleBatch:
                 for r in self.reqs
             ]
 
-        self.input_ids = input_ids
+        self.input_ids = torch.tensor(
+            input_ids, dtype=torch.int32, device=self.seq_lens.device
+        )
         self.seq_lens.add_(1)
 
         # Alloc mem
@@ -744,7 +747,9 @@ class ScheduleBatch:
             return
 
         self.reqs = [self.reqs[i] for i in unfinished_indices]
-        new_indices = torch.tensor(unfinished_indices, dtype=torch.int32, device="cuda")
+        new_indices = torch.tensor(
+            unfinished_indices, dtype=torch.int32, device=self.seq_lens.device
+        )
         self.req_pool_indices = self.req_pool_indices[new_indices]
         self.seq_lens = self.seq_lens[new_indices]
         self.out_cache_loc = None
@@ -824,7 +829,7 @@ class ModelWorkerBatch:
     # The forward mode
     forward_mode: ForwardMode
     # The input ids
-    input_ids: List[int]
+    input_ids: torch.Tensor
     # The indices of requests in the req_to_token_pool
     req_pool_indices: torch.Tensor
     # The sequence length
