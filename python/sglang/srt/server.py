@@ -25,11 +25,12 @@ import json
 import logging
 import multiprocessing as mp
 import os
-import random
 import threading
 import time
 from http import HTTPStatus
-from typing import Dict, List, Optional, Union
+from typing import AsyncIterator, Dict, List, Optional, Union
+
+import orjson
 
 # Fix a bug of Python threading
 setattr(threading, "_register_atexit", lambda *args, **kwargs: None)
@@ -40,10 +41,14 @@ import uvicorn
 import uvloop
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import ORJSONResponse, Response, StreamingResponse
+from uvicorn.config import LOGGING_CONFIG
 
 from sglang.lang.backend.runtime_endpoint import RuntimeEndpoint
 from sglang.srt.hf_transformers_utils import get_tokenizer
+from sglang.srt.managers.data_parallel_controller import (
+    run_data_parallel_controller_process,
+)
 from sglang.srt.managers.detokenizer_manager import run_detokenizer_process
 from sglang.srt.managers.io_struct import (
     EmbeddingReqInput,
@@ -145,18 +150,52 @@ async def flush_cache():
     )
 
 
+@app.get("/start_profile")
+@app.post("/start_profile")
+async def start_profile():
+    """Start profiling."""
+    tokenizer_manager.start_profile()
+    return Response(
+        content="Start profiling.\n",
+        status_code=200,
+    )
+
+
+@app.get("/stop_profile")
+@app.post("/stop_profile")
+async def stop_profile():
+    """Stop profiling."""
+    tokenizer_manager.stop_profile()
+    return Response(
+        content="Stop profiling. This will take some time.\n",
+        status_code=200,
+    )
+
+
+@app.api_route("/get_memory_pool_size", methods=["GET", "POST"])
+async def get_memory_pool_size():
+    """Get the memory pool size in number of tokens"""
+    try:
+        ret = await tokenizer_manager.get_memory_pool_size()
+        return ret.size
+    except Exception as e:
+        return JSONResponse(
+            {"error": {"message": str(e)}}, status_code=HTTPStatus.BAD_REQUEST
+        )
+
+
 @app.post("/update_weights")
 async def update_weights(obj: UpdateWeightReqInput, request: Request):
     """Update the weights inplace without re-launching the server."""
     success, message = await tokenizer_manager.update_weights(obj, request)
     content = {"success": success, "message": message}
     if success:
-        return JSONResponse(
+        return ORJSONResponse(
             content,
             status_code=HTTPStatus.OK,
         )
     else:
-        return JSONResponse(
+        return ORJSONResponse(
             content,
             status_code=HTTPStatus.BAD_REQUEST,
         )
@@ -167,14 +206,18 @@ async def generate_request(obj: GenerateReqInput, request: Request):
     """Handle a generate request."""
     if obj.stream:
 
-        async def stream_results():
+        async def stream_results() -> AsyncIterator[bytes]:
             try:
                 async for out in tokenizer_manager.generate_request(obj, request):
-                    yield f"data: {json.dumps(out, ensure_ascii=False)}\n\n"
+                    yield b"data: " + orjson.dumps(
+                        out, option=orjson.OPT_NON_STR_KEYS
+                    ) + b"\n\n"
             except ValueError as e:
                 out = {"error": {"message": str(e)}}
-                yield f"data: {json.dumps(out, ensure_ascii=False)}\n\n"
-            yield "data: [DONE]\n\n"
+                yield b"data: " + orjson.dumps(
+                    out, option=orjson.OPT_NON_STR_KEYS
+                ) + b"\n\n"
+            yield b"data: [DONE]\n\n"
 
         return StreamingResponse(
             stream_results(),
@@ -186,7 +229,7 @@ async def generate_request(obj: GenerateReqInput, request: Request):
             ret = await tokenizer_manager.generate_request(obj, request).__anext__()
             return ret
         except ValueError as e:
-            return JSONResponse(
+            return ORJSONResponse(
                 {"error": {"message": str(e)}}, status_code=HTTPStatus.BAD_REQUEST
             )
 
@@ -201,7 +244,7 @@ async def encode_request(obj: EmbeddingReqInput, request: Request):
         ret = await tokenizer_manager.generate_request(obj, request).__anext__()
         return ret
     except ValueError as e:
-        return JSONResponse(
+        return ORJSONResponse(
             {"error": {"message": str(e)}}, status_code=HTTPStatus.BAD_REQUEST
         )
 
@@ -216,7 +259,7 @@ async def judge_request(obj: RewardReqInput, request: Request):
         ret = await tokenizer_manager.generate_request(obj, request).__anext__()
         return ret
     except ValueError as e:
-        return JSONResponse(
+        return ORJSONResponse(
             {"error": {"message": str(e)}}, status_code=HTTPStatus.BAD_REQUEST
         )
 
@@ -235,13 +278,13 @@ async def openai_v1_chat_completions(raw_request: Request):
     return await v1_chat_completions(tokenizer_manager, raw_request)
 
 
-@app.post("/v1/embeddings")
+@app.post("/v1/embeddings", response_class=ORJSONResponse)
 async def openai_v1_embeddings(raw_request: Request):
     response = await v1_embeddings(tokenizer_manager, raw_request)
     return response
 
 
-@app.get("/v1/models")
+@app.get("/v1/models", response_class=ORJSONResponse)
 def available_models():
     """Show available models."""
     served_model_names = [tokenizer_manager.served_model_name]
@@ -315,30 +358,40 @@ def launch_engine(
         server_args.model_path, server_args.tokenizer_path
     )
 
-    # Launch tensor parallel scheduler processes
-    scheduler_procs = []
-    scheduler_pipe_readers = []
-    tp_size_per_node = server_args.tp_size // server_args.nnodes
-    tp_rank_range = range(
-        tp_size_per_node * server_args.node_rank,
-        tp_size_per_node * (server_args.node_rank + 1),
-    )
-    for tp_rank in tp_rank_range:
+    if server_args.dp_size == 1:
+        # Launch tensor parallel scheduler processes
+        scheduler_procs = []
+        scheduler_pipe_readers = []
+        tp_size_per_node = server_args.tp_size // server_args.nnodes
+        tp_rank_range = range(
+            tp_size_per_node * server_args.node_rank,
+            tp_size_per_node * (server_args.node_rank + 1),
+        )
+        for tp_rank in tp_rank_range:
+            reader, writer = mp.Pipe(duplex=False)
+            gpu_id = tp_rank % tp_size_per_node
+            proc = mp.Process(
+                target=run_scheduler_process,
+                args=(server_args, port_args, gpu_id, tp_rank, None, writer),
+            )
+            proc.start()
+            scheduler_procs.append(proc)
+            scheduler_pipe_readers.append(reader)
+
+        if server_args.node_rank >= 1:
+            # For other nodes, they do not need to run tokenizer or detokenizer,
+            # so they can just wait here.
+            while True:
+                pass
+    else:
+        # Launch the data parallel controller
         reader, writer = mp.Pipe(duplex=False)
-        gpu_id = tp_rank % tp_size_per_node
+        scheduler_pipe_readers = [reader]
         proc = mp.Process(
-            target=run_scheduler_process,
-            args=(server_args, port_args, gpu_id, tp_rank, writer),
+            target=run_data_parallel_controller_process,
+            args=(server_args, port_args, writer),
         )
         proc.start()
-        scheduler_procs.append(proc)
-        scheduler_pipe_readers.append(reader)
-
-    if server_args.node_rank >= 1:
-        # For other nodes, they do not need to run tokenizer or detokenizer,
-        # so they can just wait here.
-        while True:
-            pass
 
     # Launch detokenizer process
     detoken_proc = mp.Process(
@@ -394,6 +447,14 @@ def launch_server(
 
     try:
         # Listen for HTTP requests
+        LOGGING_CONFIG["formatters"]["default"][
+            "fmt"
+        ] = "[%(asctime)s] %(levelprefix)s %(message)s"
+        LOGGING_CONFIG["formatters"]["default"]["datefmt"] = "%Y-%m-%d %H:%M:%S"
+        LOGGING_CONFIG["formatters"]["access"][
+            "fmt"
+        ] = '[%(asctime)s] %(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s'
+        LOGGING_CONFIG["formatters"]["access"]["datefmt"] = "%Y-%m-%d %H:%M:%S"
         uvicorn.run(
             app,
             host=server_args.host,
@@ -412,7 +473,7 @@ def _set_envs_and_config(server_args: ServerArgs):
     os.environ["NCCL_CUMEM_ENABLE"] = "0"
     os.environ["NCCL_NVLS_ENABLE"] = "0"
     os.environ["TORCH_NCCL_AVOID_RECORD_STREAMS"] = "1"
-    os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
+    os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "4"
 
     # Set ulimit
     set_ulimit()
@@ -492,6 +553,8 @@ def _wait_and_warmup(server_args, pipe_finish_writer, pid):
         logger.error(f"Initialization failed. warmup error: {last_traceback}")
         kill_child_process(pid, including_parent=False)
         return
+
+    # logger.info(f"{res.json()=}")
 
     logger.info("The server is fired up and ready to roll!")
     if pipe_finish_writer is not None:
@@ -657,6 +720,10 @@ class Runtime:
         self.shutdown()
 
 
+STREAM_END_SYMBOL = b"data: [DONE]"
+STREAM_CHUNK_START_SYMBOL = b"data:"
+
+
 class Engine:
     """
     SRT Engine without an HTTP server layer.
@@ -681,6 +748,56 @@ class Engine:
         logprob_start_len: Optional[Union[List[int], int]] = None,
         top_logprobs_num: Optional[Union[List[int], int]] = None,
         lora_path: Optional[List[Optional[str]]] = None,
+        stream: bool = False,
+    ):
+        # TODO (ByronHsu): refactor to reduce the duplicated code
+
+        obj = GenerateReqInput(
+            text=prompt,
+            sampling_params=sampling_params,
+            return_logprob=return_logprob,
+            logprob_start_len=logprob_start_len,
+            top_logprobs_num=top_logprobs_num,
+            lora_path=lora_path,
+            stream=stream,
+        )
+
+        # get the current event loop
+        loop = asyncio.get_event_loop()
+        ret = loop.run_until_complete(generate_request(obj, None))
+
+        if stream is True:
+
+            def generator_wrapper():
+                offset = 0
+                loop = asyncio.get_event_loop()
+                generator = ret.body_iterator
+                while True:
+                    chunk = loop.run_until_complete(generator.__anext__())
+
+                    if chunk.startswith(STREAM_END_SYMBOL):
+                        break
+                    else:
+                        data = json.loads(chunk[len(STREAM_CHUNK_START_SYMBOL) :])
+                        data["text"] = data["text"][offset:]
+                        offset += len(data["text"])
+                        yield data
+
+            # we cannot yield in the scope of generate() because python does not allow yield + return in the same function
+            # however, it allows to wrap the generator as a subfunction and return
+            return generator_wrapper()
+        else:
+            return ret
+
+    async def async_generate(
+        self,
+        prompt: Union[str, List[str]],
+        sampling_params: Optional[Dict] = None,
+        return_logprob: Optional[Union[List[bool], bool]] = False,
+        logprob_start_len: Optional[Union[List[int], int]] = None,
+        top_logprobs_num: Optional[Union[List[int], int]] = None,
+        lora_path: Optional[List[Optional[str]]] = None,
+        stream: bool = False,
     ):
         obj = GenerateReqInput(
             text=prompt,
@@ -689,13 +806,42 @@ class Engine:
             logprob_start_len=logprob_start_len,
             top_logprobs_num=top_logprobs_num,
             lora_path=lora_path,
+            stream=stream,
         )
 
-        # get the current event loop
-        loop = asyncio.get_event_loop()
-        return loop.run_until_complete(generate_request(obj, None))
+        ret = await generate_request(obj, None)
+
+        if stream is True:
+            generator = ret.body_iterator
+
+            async def generator_wrapper():
+
+                offset = 0
+
+                while True:
+                    chunk = await generator.__anext__()
+
+                    if chunk.startswith(STREAM_END_SYMBOL):
+                        break
+                    else:
+                        data = json.loads(chunk[len(STREAM_CHUNK_START_SYMBOL) :])
+                        data["text"] = data["text"][offset:]
+                        offset += len(data["text"])
+                        yield data
+
+            return generator_wrapper()
+        else:
+            return ret
 
     def shutdown(self):
         kill_child_process(os.getpid(), including_parent=False)
 
-    # TODO (ByronHsu): encode and async generate
+    def get_tokenizer(self):
+        global tokenizer_manager
+
+        if tokenizer_manager is None:
+            raise ReferenceError("Tokenizer Manager is not initialized.")
+        else:
+            return tokenizer_manager.tokenizer
+
+    # TODO (ByronHsu): encode

@@ -35,7 +35,7 @@ import psutil
 import requests
 import torch
 import torch.distributed as dist
-from fastapi.responses import JSONResponse
+from fastapi.responses import ORJSONResponse
 from packaging import version as pkg_version
 from torch import nn
 from torch.profiler import ProfilerActivity, profile, record_function
@@ -140,26 +140,41 @@ def calculate_time(show=False, min_cost_ms=0.0):
     return wrapper
 
 
-def get_available_gpu_memory(gpu_id, distributed=False):
+def get_available_gpu_memory(device, gpu_id, distributed=False):
     """
     Get available memory for cuda:gpu_id device.
     When distributed is True, the available memory is the minimum available memory of all GPUs.
     """
-    num_gpus = torch.cuda.device_count()
-    assert gpu_id < num_gpus
+    if device == "cuda":
+        num_gpus = torch.cuda.device_count()
+        assert gpu_id < num_gpus
 
-    if torch.cuda.current_device() != gpu_id:
-        print(
-            f"WARNING: current device is not {gpu_id}, but {torch.cuda.current_device()}, ",
-            "which may cause useless memory allocation for torch CUDA context.",
-        )
+        if torch.cuda.current_device() != gpu_id:
+            print(
+                f"WARNING: current device is not {gpu_id}, but {torch.cuda.current_device()}, ",
+                "which may cause useless memory allocation for torch CUDA context.",
+            )
 
-    torch.cuda.empty_cache()
-    free_gpu_memory, _ = torch.cuda.mem_get_info(gpu_id)
+        torch.cuda.empty_cache()
+        free_gpu_memory, _ = torch.cuda.mem_get_info(gpu_id)
+
+    elif device == "xpu":
+        num_gpus = torch.xpu.device_count()
+        assert gpu_id < num_gpus
+
+        if torch.xpu.current_device() != gpu_id:
+            print(
+                f"WARNING: current device is not {gpu_id}, but {torch.xpu.current_device()}, ",
+                "which may cause useless memory allocation for torch XPU context.",
+            )
+        torch.xpu.empty_cache()
+        used_memory = torch.xpu.memory_allocated()
+        total_gpu_memory = torch.xpu.get_device_properties(gpu_id).total_memory
+        free_gpu_memory = total_gpu_memory - used_memory
 
     if distributed:
         tensor = torch.tensor(free_gpu_memory, dtype=torch.float32).to(
-            torch.device("cuda", gpu_id)
+            torch.device(device, gpu_id)
         )
         torch.distributed.all_reduce(tensor, op=torch.distributed.ReduceOp.MIN)
         free_gpu_memory = tensor.item()
@@ -194,6 +209,28 @@ def is_multimodal_model(model_architectures):
         or "LlavaQwenForCausalLM" in model_architectures
         or "LlavaMistralForCausalLM" in model_architectures
         or "LlavaVidForCausalLM" in model_architectures
+        or "MllamaForConditionalGeneration" in model_architectures
+        or "Qwen2VLForConditionalGeneration" in model_architectures
+    ):
+        return True
+    else:
+        return False
+
+
+def is_attention_free_model(model_architectures):
+    return False
+
+
+def model_has_inner_state(model_architectures):
+    return False
+
+
+def is_embedding_model(model_architectures):
+    if (
+        "LlamaEmbeddingModel" in model_architectures
+        or "MistralModel" in model_architectures
+        or "LlamaForSequenceClassification" in model_architectures
+        or "LlamaForSequenceClassificationWithNormal_Weights" in model_architectures
     ):
         return True
     else:
@@ -551,7 +588,7 @@ def add_api_key_middleware(app, api_key: str):
         if request.url.path.startswith("/health"):
             return await call_next(request)
         if request.headers.get("Authorization") != "Bearer " + api_key:
-            return JSONResponse(content={"error": "Unauthorized"}, status_code=401)
+            return ORJSONResponse(content={"error": "Unauthorized"}, status_code=401)
         return await call_next(request)
 
 
@@ -569,10 +606,11 @@ def prepare_model_and_tokenizer(model_path: str, tokenizer_path: str):
 
 def configure_logger(server_args, prefix: str = ""):
     format = f"[%(asctime)s{prefix}] %(message)s"
+    # format = f"[%(asctime)s.%(msecs)03d{prefix}] %(message)s"
     logging.basicConfig(
         level=getattr(logging, server_args.log_level.upper()),
         format=format,
-        datefmt="%H:%M:%S",
+        datefmt="%Y-%m-%d %H:%M:%S",
         force=True,
     )
 
@@ -675,3 +713,10 @@ def pytorch_profile(name, func, *args, data_size=-1):
     prof.export_chrome_trace(f"trace/{name}_{step_counter}.json")
     step_counter += 1
     return result
+
+
+def first_rank_print(*args, **kwargs):
+    if torch.cuda.current_device() == 0:
+        print(*args, **kwargs)
+    else:
+        pass

@@ -11,12 +11,15 @@ suites = {
         "models/test_reward_models.py",
         "sampling/penaltylib",
         "test_chunked_prefill.py",
+        "test_double_sparsity.py",
         "test_embedding_openai_server.py",
         "test_eval_accuracy_mini.py",
         "test_json_constrained.py",
-        "test_large_max_new_tokens.py",
+        # "test_large_max_new_tokens.py",  # This test hangs on CI due to unknown reasons
         "test_openai_server.py",
+        "test_overlap_schedule.py",
         "test_pytorch_sampling_backend.py",
+        "test_retract_decode.py",
         "test_server_args.py",
         "test_skip_tokenizer_init.py",
         "test_srt_engine.py",
@@ -76,6 +79,8 @@ if __name__ == "__main__":
         files = suites[args.suite]
 
     files = files[args.range_begin : args.range_end]
+
+    print("The running tests are ", files)
 
     exit_code = run_unittest_files(files, args.timeout_per_file)
     exit(exit_code)

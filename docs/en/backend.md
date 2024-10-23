@@ -79,7 +79,7 @@ python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct 
 ```
 python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct --chunked-prefill-size 4096
 ```
-- To enable torch.compile acceleration, add `--enable-torch-compile`. It accelerates small models on small batch sizes.
+- To enable torch.compile acceleration, add `--enable-torch-compile`. It accelerates small models on small batch sizes. This does not work for FP8 currenly.
 - To enable torchao quantization, add `--torchao-config int4wo-128`. It supports various quantization strategies.
 - To enable fp8 weight quantization, add `--quantization fp8` on a fp16 checkpoint or directly load a fp8 checkpoint without specifying any arguments.
 - To enable fp8 kv cache quantization, add `--kv-cache-dtype fp8_e5m2`.
@@ -92,6 +92,35 @@ python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct 
 # Node 1
 python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct --tp 4 --nccl-init sgl-dev-0:50000 --nnodes 2 --node-rank 1
 ```
+
+### Engine Without HTTP Server
+
+We also provide an inference engine **without a HTTP server**. For example,
+
+```python
+import sglang as sgl
+
+def main():
+    prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+    ]
+    sampling_params = {"temperature": 0.8, "top_p": 0.95}
+    llm = sgl.Engine(model_path="meta-llama/Meta-Llama-3.1-8B-Instruct")
+
+    outputs = llm.generate(prompts, sampling_params)
+    for prompt, output in zip(prompts, outputs):
+        print("===============================")
+        print(f"Prompt: {prompt}\nGenerated text: {output['text']}")
+
+if __name__ == "__main__":
+    main()
+```
+
+This can be used for offline batch inference and building custom servers.
+You can view the full example [here](https://github.com/sgl-project/sglang/tree/main/examples/runtime/engine).
 
 ### Supported Models
 
