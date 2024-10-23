@@ -176,17 +176,14 @@ class CompletionRequest(BaseModel):
     min_tokens: int = 0
     repetition_penalty: Optional[float] = 1.0
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
-<<<<<<< HEAD
     min_p: float = 0.0
     dry_multiplier: float = 0.0
     dry_base: float = 0.0
     dry_allowed_length: int = 2
     dry_penalty_last_n: int = 0
     dry_sequence_breakers: Optional[List[str]] = []
-=======
     no_stop_trim: Union[bool, List[bool]] = False
 
->>>>>>> b7d0559496569a7210de911cb0b23faf384d0bba
 
 class CompletionResponseChoice(BaseModel):
     index: int
@@ -289,17 +286,14 @@ class ChatCompletionRequest(BaseModel):
     min_tokens: Optional[int] = 0
     repetition_penalty: Optional[float] = 1.0
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
-<<<<<<< HEAD
     min_p: float = 0.0
     dry_multiplier: float = 0.0
     dry_base: float = 0.0
     dry_allowed_length: int = 2
     dry_penalty_last_n: int = 0
     dry_sequence_breakers: Optional[List[str]] = []
-=======
     ignore_eos: bool = False
 
->>>>>>> b7d0559496569a7210de911cb0b23faf384d0bba
 
 class ChatMessage(BaseModel):
     role: Optional[str] = None

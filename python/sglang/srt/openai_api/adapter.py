@@ -498,31 +498,6 @@ def v1_generate_request(
         top_logprobs_nums.append(
             request.logprobs if request.logprobs is not None else 0
         )
-<<<<<<< HEAD
-        sampling_params_list.append(
-            {
-                "temperature": request.temperature,
-                "max_new_tokens": request.max_tokens,
-                "min_new_tokens": request.min_tokens,
-                "stop": request.stop,
-                "stop_token_ids": request.stop_token_ids,
-                "top_p": request.top_p,
-                "presence_penalty": request.presence_penalty,
-                "frequency_penalty": request.frequency_penalty,
-                "repetition_penalty": request.repetition_penalty,
-                "min_p": request.min_p,
-                "dry_multiplier": request.dry_multiplier,
-                "dry_base": request.dry_base,
-                "dry_allowed_length": request.dry_allowed_length,
-                "dry_penalty_last_n": request.dry_penalty_last_n,
-                "dry_sequence_breakers": request.dry_sequence_breakers,
-                "regex": request.regex,
-                "json_schema": request.json_schema,
-                "n": request.n,
-                "ignore_eos": request.ignore_eos,
-            }
-        )
-=======
         sampling_params = []
         if isinstance(request.no_stop_trim, list):
             num_reqs = len(request.prompt)
@@ -540,6 +515,12 @@ def v1_generate_request(
                     "presence_penalty": request.presence_penalty,
                     "frequency_penalty": request.frequency_penalty,
                     "repetition_penalty": request.repetition_penalty,
+                    "min_p": request.min_p,
+                    "dry_multiplier": request.dry_multiplier,
+                    "dry_base": request.dry_base,
+                    "dry_allowed_length": request.dry_allowed_length,
+                    "dry_penalty_last_n": request.dry_penalty_last_n,
+                    "dry_sequence_breakers": request.dry_sequence_breakers,
                     "regex": request.regex,
                     "json_schema": request.json_schema,
                     "n": request.n,
@@ -555,7 +536,6 @@ def v1_generate_request(
             sampling_params_list.append(sampling_params[0])
         else:
             sampling_params_list.append(sampling_params)
->>>>>>> b7d0559496569a7210de911cb0b23faf384d0bba
 
     if len(all_requests) == 1:
         prompt = prompts[0]
