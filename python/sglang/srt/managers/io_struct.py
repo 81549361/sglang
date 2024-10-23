@@ -20,6 +20,7 @@ processes (TokenizerManager, DetokenizerManager, Controller).
 
 import uuid
 from dataclasses import dataclass
+from enum import Enum
 from typing import Dict, List, Optional, Union
 
 from sglang.srt.managers.schedule_batch import BaseFinishReason
@@ -54,6 +55,9 @@ class GenerateReqInput:
     modalities: Optional[List[str]] = None
     # LoRA related
     lora_path: Optional[Union[List[Optional[str]], Optional[str]]] = None
+
+    # Whether it is a single request or a batch request
+    is_single: bool = True
 
     def post_init(self):
         if (self.text is None and self.input_ids is None) or (
@@ -119,8 +123,7 @@ class GenerateReqInput:
             elif not isinstance(self.image_data, list):
                 self.image_data = [self.image_data] * num
             elif isinstance(self.image_data, list):
-                # FIXME incorrect order for duplication
-                self.image_data = self.image_data * num
+                pass
 
             if self.sampling_params is None:
                 self.sampling_params = [{}] * num
@@ -295,6 +298,7 @@ class BatchTokenIDOut:
     spaces_between_special_tokens: List[bool]
     meta_info: List[Dict]
     finished_reason: List[BaseFinishReason]
+    no_stop_trim: List[bool]
 
 
 @dataclass
@@ -344,3 +348,18 @@ class UpdateWeightReqOutput:
 class AbortReq:
     # The request id
     rid: str
+
+
+class ProfileReq(Enum):
+    START_PROFILE = 1
+    STOP_PROFILE = 2
+
+
+@dataclass
+class GetMemPoolSizeReq:
+    pass
+
+
+@dataclass
+class GetMemPoolSizeReqOutput:
+    size: int
