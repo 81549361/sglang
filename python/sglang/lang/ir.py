@@ -31,6 +31,8 @@ class SglSamplingParams:
     dry_allowed_length: int = 2
     dry_penalty_last_n: int = 0
     dry_sequence_breakers: Optional[List[str]] = ()
+    xtc_threshold: float = 0.1,
+    xtc_probability: float = 0,
     ignore_eos: bool = False
     return_logprob: Optional[bool] = None
     logprob_start_len: Optional[int] = (None,)
@@ -59,6 +61,8 @@ class SglSamplingParams:
             self.dry_allowed_length,
             self.dry_penalty_last_n,
             self.dry_sequence_breakers,
+            self.xtc_threshold,
+            self.xtc_probability,
             self.ignore_eos,
             self.return_logprob,
             self.logprob_start_len,
@@ -85,6 +89,8 @@ class SglSamplingParams:
             "dry_allowed_length": self.dry_allowed_length,
             "dry_penalty_last_n": self.dry_penalty_last_n,
             "dry_sequence_breakers": self.dry_sequence_breakers,
+            "xtc_probability": self.xtc_probability,
+            "xtc_threshold": self.xtc_threshold,
         }
 
     def to_vertexai_kwargs(self):
@@ -105,6 +111,8 @@ class SglSamplingParams:
             "dry_allowed_length": self.dry_allowed_length,
             "dry_penalty_last_n": self.dry_penalty_last_n,
             "dry_sequence_breakers": self.dry_sequence_breakers,
+            "xtc_probability": self.xtc_probability,
+            "xtc_threshold": self.xtc_threshold,
         }
 
     def to_anthropic_kwargs(self):
@@ -138,6 +146,8 @@ class SglSamplingParams:
             "dry_allowed_length": self.dry_allowed_length,
             "dry_penalty_last_n": self.dry_penalty_last_n,
             "dry_sequence_breakers": self.dry_sequence_breakers,
+            "xtc_probability": self.xtc_probability,
+            "xtc_threshold": self.xtc_threshold,
         }
 
     def to_srt_kwargs(self):
@@ -157,6 +167,8 @@ class SglSamplingParams:
             "dry_allowed_length": self.dry_allowed_length,
             "dry_penalty_last_n": self.dry_penalty_last_n,
             "dry_sequence_breakers": self.dry_sequence_breakers,
+            "xtc_probability": self.xtc_probability,
+            "xtc_threshold": self.xtc_threshold,
             "ignore_eos": self.ignore_eos,
             "regex": self.regex,
             "json_schema": self.json_schema,
@@ -199,6 +211,8 @@ class SglFunction:
         dry_allowed_length: int = 2,
         dry_penalty_last_n: int = 0,
         dry_sequence_breakers: Optional[List[str]] = [],
+        xtc_threshold: float = 0.1,
+        xtc_probability: float = 0,
         ignore_eos: bool = False,
         return_logprob: Optional[bool] = None,
         logprob_start_len: Optional[int] = None,
@@ -231,6 +245,8 @@ class SglFunction:
             dry_allowed_length=dry_allowed_length,
             dry_penalty_last_n=dry_penalty_last_n,
             dry_sequence_breakers=dry_sequence_breakers,
+            xtc_threshold=xtc_threshold,
+            xtc_probability=xtc_probability,
             ignore_eos=ignore_eos,
             return_logprob=return_logprob,
             logprob_start_len=logprob_start_len,
@@ -258,6 +274,8 @@ class SglFunction:
         dry_allowed_length: int = 2,
         dry_penalty_last_n: int = 0,
         dry_sequence_breakers: Optional[List[str]] = [],
+        xtc_threshold: float = 0.1,
+        xtc_probability: float = 0,
         ignore_eos: bool = False,
         return_logprob: Optional[bool] = None,
         logprob_start_len: Optional[int] = None,
@@ -307,6 +325,8 @@ class SglFunction:
             dry_allowed_length=dry_allowed_length,
             dry_penalty_last_n=dry_penalty_last_n,
             dry_sequence_breakers=dry_sequence_breakers,
+            xtc_threshold=xtc_threshold,
+            xtc_probability=xtc_probability,
             ignore_eos=ignore_eos,
             return_logprob=return_logprob,
             logprob_start_len=logprob_start_len,
@@ -494,6 +514,8 @@ class SglGen(SglExpr):
         dry_allowed_length: int = 2,
         dry_penalty_last_n: int = 0,
         dry_sequence_breakers: Optional[List[str]] = [],
+        xtc_threshold: float = 0.1,
+        xtc_probability: float = 0,
         ignore_eos: Optional[bool] = None,
         return_logprob: Optional[bool] = None,
         logprob_start_len: Optional[int] = None,
@@ -522,6 +544,8 @@ class SglGen(SglExpr):
             dry_allowed_length=dry_allowed_length,
             dry_penalty_last_n=dry_penalty_last_n,
             dry_sequence_breakers=dry_sequence_breakers,
+            xtc_threshold=xtc_threshold,
+            xtc_probability=xtc_probability,
             ignore_eos=ignore_eos,
             return_logprob=return_logprob,
             logprob_start_len=logprob_start_len,

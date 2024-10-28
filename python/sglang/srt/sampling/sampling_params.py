@@ -38,6 +38,8 @@ class SamplingParams:
         dry_base: float = 0.0,
         dry_allowed_length: int = 2,
         dry_penalty_last_n: int = 0,
+        xtc_threshold: float = 0.1,
+        xtc_probability: float = 0.0,
         dry_sequence_breakers: Optional[List[str]] = [],
         ignore_eos: bool = False,
         skip_special_tokens: bool = True,
@@ -59,6 +61,8 @@ class SamplingParams:
         self.dry_allowed_length=dry_allowed_length
         self.dry_penalty_last_n=dry_penalty_last_n
         self.dry_sequence_breakers=dry_sequence_breakers
+        self.xtc_threshold=xtc_threshold
+        self.xtc_probability=xtc_probability
         self.stop_strs = stop
         if stop_token_ids:
             self.stop_token_ids = set(stop_token_ids)
@@ -169,6 +173,8 @@ class SamplingParams:
             "dry_allowed_length": self.dry_allowed_length,
             "dry_penalty_last_n": self.dry_penalty_last_n,
             "dry_sequence_breakers": self.dry_sequence_breakers,
+            "xtc_threshold": self.xtc_threshold,
+            "xtc_probability": self.xtc_probability,
             "ignore_eos": self.ignore_eos,
             "regex": self.regex,
         }

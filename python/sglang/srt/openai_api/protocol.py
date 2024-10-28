@@ -182,6 +182,8 @@ class CompletionRequest(BaseModel):
     dry_allowed_length: int = 2
     dry_penalty_last_n: int = 0
     dry_sequence_breakers: Optional[List[str]] = []
+    xtc_threshold: float = 0.1
+    xtc_probability: float = 0.0
     no_stop_trim: Union[bool, List[bool]] = False
 
 
@@ -292,6 +294,8 @@ class ChatCompletionRequest(BaseModel):
     dry_allowed_length: int = 2
     dry_penalty_last_n: int = 0
     dry_sequence_breakers: Optional[List[str]] = []
+    xtc_threshold: float = 0.1
+    xtc_probability: float = 0.0
     ignore_eos: bool = False
 
 

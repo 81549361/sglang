@@ -137,6 +137,8 @@ class CompiledFunction:
         dry_base: float = 0.0,
         dry_allowed_length: int = 2,
         dry_penalty_last_n: int = 0,
+        xtc_threshold: float = 0.1,
+        xtc_probability: float = 0.0,
         dry_sequence_breakers: Optional[List[str]] = [],
         backend=None,
         **kwargs,
@@ -159,6 +161,8 @@ class CompiledFunction:
             dry_allowed_length=dry_allowed_length,
             dry_penalty_last_n=dry_penalty_last_n,
             dry_sequence_breakers=dry_sequence_breakers,
+            xtc_threshold=xtc_threshold,
+            xtc_probability=xtc_probability,
         )
 
         return self.run_internal(backend, kwargs, default_sampling_para)
@@ -180,6 +184,8 @@ class CompiledFunction:
         dry_allowed_length: int = 2,
         dry_penalty_last_n: int = 0,
         dry_sequence_breakers: Optional[List[str]] = [],
+        xtc_threshold: float = 0.1,
+        xtc_probability: float = 0.0,
         backend=None,
         num_threads: Union[str, int] = "auto",
     ):
@@ -204,6 +210,8 @@ class CompiledFunction:
             dry_allowed_length=dry_allowed_length,
             dry_penalty_last_n=dry_penalty_last_n,
             dry_sequence_breakers=dry_sequence_breakers,
+            xtc_threshold=xtc_threshold,
+            xtc_probability=xtc_probability,
         )
 
         # Extract prefix by tracing and cache it

@@ -682,6 +682,8 @@ class StreamExecutor:
             "dry_allowed_length",
             "dry_penalty_last_n",
             "dry_sequence_breakers",
+            "xtc_threshold",
+            "xtc_probability",
             "ignore_eos",
             "return_logprob",
             "logprob_start_len",
