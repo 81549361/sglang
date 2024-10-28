@@ -97,6 +97,7 @@ class SamplingBatchInfo:
                 batch=batch,
                 device=batch.device,
                 Penalizers={
+                    penaltylib.BatchedXTCPenalizer,
                     penaltylib.BatchedFrequencyPenalizer,
                     penaltylib.BatchedMinNewTokensPenalizer,
                     penaltylib.BatchedPresencePenalizer,

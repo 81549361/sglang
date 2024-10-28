@@ -4,6 +4,7 @@ from .penalizers.min_new_tokens import BatchedMinNewTokensPenalizer
 from .penalizers.presence_penalty import BatchedPresencePenalizer
 from .penalizers.repetition_penalty import BatchedRepetitionPenalizer
 from .penalizers.dry_penalty import BatchedDryPenalizer
+from .penalizers.xtc_penalty import BatchedXTCPenalizer
 
 __all__ = [
     "BatchedFrequencyPenalizer",
@@ -12,4 +13,5 @@ __all__ = [
     "BatchedRepetitionPenalizer",
     "BatchedPenalizerOrchestrator",
     "BatchedDryPenalizer",
+    "BatchedXTCPenalizer",
 ]
