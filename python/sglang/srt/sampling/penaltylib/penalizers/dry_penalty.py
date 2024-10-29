@@ -68,14 +68,16 @@ class BatchedDryPenalizer(_BatchedPenalizer):
         self.input_ids = None
 
     def _cumulate_input_tokens(self, input_ids: _TokenIDs):
-        # input_ids is a list of tensors, one per sequence
         for i in range(len(self.input_ids)):
-            self.input_ids[i] = torch.cat([self.input_ids[i], input_ids.token_ids[i]])
+            tokens = input_ids.token_ids[i]
+            tokens = tokens.view(-1)  # Ensure tokens are 1D tensors
+            self.input_ids[i] = torch.cat([self.input_ids[i], tokens])
 
     def _cumulate_output_tokens(self, output_ids: _TokenIDs):
-        # In _cumulate_output_tokens
         for i in range(len(self.input_ids)):
-            self.input_ids[i] = torch.cat([self.input_ids[i], output_ids.token_ids[i]])
+            tokens = output_ids.token_ids[i]
+            tokens = tokens.view(-1)  # Ensure tokens are 1D tensors
+            self.input_ids[i] = torch.cat([self.input_ids[i], tokens])
 
     def _apply(self, logits: torch.Tensor) -> torch.Tensor:
         num_seqs, vocab_size = logits.shape
