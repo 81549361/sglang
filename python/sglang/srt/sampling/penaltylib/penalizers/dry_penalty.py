@@ -72,47 +72,30 @@ class BatchedDryPenalizer(_BatchedPenalizer):
     def _apply(self, logits: torch.Tensor) -> torch.Tensor:
         batch_size, seq_length = logits.shape[0], logits.shape[1]
         max_back_length = 50  # Limit the backward match to 50 to prevent overflow
-        for i in range(1):
-            # Ensure self.input_ids is initialized
-            if self.input_ids is None:
-                self.input_ids = []
+
+        for i in range(batch_size):
+            # Ensure self.input_ids is initialized as a list
+            if self.input_ids is None or isinstance(self.input_ids, torch.Tensor):
+                self.input_ids = [torch.empty(0, dtype=torch.long, device=logits.device) for _ in range(batch_size)]
 
             # Check if output_ids is not None
             if self.output_ids is not None:
                 # Convert lists to tensors if necessary
                 if isinstance(self.output_ids, list):
-                    self.output_ids = torch.tensor(self.output_ids)
+                    self.output_ids = torch.tensor(self.output_ids, dtype=torch.long, device=logits.device)
 
-                # Move output_ids to the same device as input_ids
-                device = self.input_ids[i].device if i < len(self.input_ids) else self.output_ids.device
-                self.output_ids = self.output_ids.to(device)
-
-                if i < len(self.input_ids):
-                    if isinstance(self.input_ids[i], list):
-                        self.input_ids[i] = torch.tensor(self.input_ids[i])
-                    
-                    self.input_ids[i] = self.input_ids[i].to(device)
-                    self.input_ids[i] = torch.cat(
-                        [self.input_ids[i], self.output_ids], dim=0
-                    )
-                else:
-                    if isinstance(self.input_ids, list):
-                        self.input_ids = torch.tensor(self.input_ids)
-
-                    self.input_ids = self.input_ids.to(device)
-                    new_tensor = torch.cat([self.input_ids, self.output_ids], dim=0)
-                    self.input_ids.append(new_tensor)
-
-                input_ids = self.input_ids[i]
+                # Ensure input_ids[i] is on the correct device
+                self.input_ids[i] = self.input_ids[i].to(logits.device)
+                self.input_ids[i] = torch.cat([self.input_ids[i], self.output_ids], dim=0)
             else:
-                if i < len(self.input_ids) and self.input_ids[i] is not None:
-                    input_ids = self.input_ids[i]
-                else:
+                if i >= len(self.input_ids) or self.input_ids[i] is None:
                     continue
-            input_ids = input_ids.tolist()
+
+            input_ids = self.input_ids[i].tolist()
             range_limit = min(self.ranges[0].item(), len(input_ids))
             input_ids = input_ids[-range_limit:] if range_limit > 0 else input_ids
             last_token = input_ids[-1]
+
             if last_token in self.sequence_breakers[0]:
                 continue
 
