@@ -96,12 +96,7 @@ class BatchedDryPenalizer(_BatchedPenalizer):
                         [self.input_ids[i], self.output_ids], dim=0
                     )
                 else:
-                    if isinstance(self.input_ids, list):
-                        self.input_ids = torch.tensor(self.input_ids)
-
-                    self.input_ids = self.input_ids.to(device)
-                    new_tensor = torch.cat([torch.tensor(self.input_ids).to(device), self.output_ids.to(device)], dim=0)
-                    self.input_ids.append(new_tensor)
+                    continue
 
                 input_ids = self.input_ids[i]
             else:
