@@ -46,12 +46,11 @@ class BatchedDryPenalizer(_BatchedPenalizer):
             device=device,
         )
 
-        self.dry_sequence_breakerss = []
-        for req in reqs:
-            breakers = set(req.sampling_params.dry_sequence_breakers or [])
-            breakers |= set(req.tokenizer.additional_sequence_breakers or [])
-            breakers.add(req.tokenizer.eos_token_id)
-            self.dry_sequence_breakerss.append(breakers)
+        self.sequence_breakers = [
+            [req.tokenizer.encode(f'a{prompt}', add_special_tokens=False)[-1] 
+            for prompt in req.sampling_params.dry_sequence_breakers]
+            for req in self.orchestrator.reqs()
+        ]
 
         self.input_ids = [torch.tensor([], dtype=torch.int64, device=device) for _ in range(batch_size)]
 
