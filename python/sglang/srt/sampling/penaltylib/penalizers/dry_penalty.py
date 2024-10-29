@@ -73,25 +73,33 @@ class BatchedDryPenalizer(_BatchedPenalizer):
         batch_size, seq_length = logits.shape[0], logits.shape[1]
         max_back_length = 50  # Limit the backward match to 50 to prevent overflow
         for i in range(1):
+            # Ensure self.input_ids is initialized
             if self.input_ids is None:
                 self.input_ids = []
 
+            # Check if output_ids is not None
             if self.output_ids is not None:
                 # Convert lists to tensors if necessary
                 if isinstance(self.output_ids, list):
                     self.output_ids = torch.tensor(self.output_ids)
 
+                # Move output_ids to the same device as input_ids
+                device = self.input_ids[i].device if i < len(self.input_ids) else self.output_ids.device
+                self.output_ids = self.output_ids.to(device)
+
                 if i < len(self.input_ids):
                     if isinstance(self.input_ids[i], list):
                         self.input_ids[i] = torch.tensor(self.input_ids[i])
                     
+                    self.input_ids[i] = self.input_ids[i].to(device)
                     self.input_ids[i] = torch.cat(
                         [self.input_ids[i], self.output_ids], dim=0
                     )
                 else:
                     if isinstance(self.input_ids, list):
                         self.input_ids = torch.tensor(self.input_ids)
-                    
+
+                    self.input_ids = self.input_ids.to(device)
                     new_tensor = torch.cat([self.input_ids, self.output_ids], dim=0)
                     self.input_ids.append(new_tensor)
 
