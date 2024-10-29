@@ -5,7 +5,7 @@ import torch
 from ..orchestrator import _BatchedPenalizer, _TokenIDs
 
 
-class BatchedDRYPenalizer(_BatchedPenalizer):
+class BatchedDryPenalizer(_BatchedPenalizer):
     """
     Batched DRY (Don't Repeat Yourself) Penalizer penalizes tokens based on repetitive patterns
     in the generated sequence to encourage diversity.
@@ -123,7 +123,7 @@ class BatchedDRYPenalizer(_BatchedPenalizer):
         self.dry_sequence_breakerss = [self.dry_sequence_breakerss[i] for i in indices_to_keep]
         self.input_ids = [self.input_ids[i] for i in indices_to_keep]
 
-    def _merge(self, their: "BatchedDRYPenalizer"):
+    def _merge(self, their: "BatchedDryPenalizer"):
         self.dry_multipliers = torch.cat([self.dry_multipliers, their.dry_multipliers], dim=0)
         self.dry_bases = torch.cat([self.dry_bases, their.dry_bases], dim=0)
         self.dry_allowed_lengths = torch.cat([self.dry_allowed_lengths, their.dry_allowed_lengths], dim=0)
