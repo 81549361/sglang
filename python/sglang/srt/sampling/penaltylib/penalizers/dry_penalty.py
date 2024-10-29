@@ -73,17 +73,25 @@ class BatchedDryPenalizer(_BatchedPenalizer):
         batch_size, seq_length = logits.shape[0], logits.shape[1]
         max_back_length = 50  # Limit the backward match to 50 to prevent overflow
         for i in range(1):
+            if self.input_ids is None:
+                # Initialize self.input_ids as needed, for example:
+                self.input_ids = []
+
             if self.output_ids is not None:
                 if i < len(self.input_ids):
-                    input_ids = self.input_ids[i] = torch.cat(
+                    self.input_ids[i] = torch.cat(
                         [self.input_ids[i], self.output_ids], dim=0
                     )
                 else:
-                    input_ids = self.input_ids[i] = torch.cat(
-                        [self.input_ids, self.output_ids], dim=0
+                    self.input_ids.append(
+                        torch.cat([self.input_ids, self.output_ids], dim=0)
                     )
-            else:
                 input_ids = self.input_ids[i]
+            else:
+                if i < len(self.input_ids) and self.input_ids[i] is not None:
+                    input_ids = self.input_ids[i]
+                else:
+                    continue
             input_ids = input_ids.tolist()
             range_limit = min(self.ranges[0].item(), len(input_ids))
             input_ids = input_ids[-range_limit:] if range_limit > 0 else input_ids
