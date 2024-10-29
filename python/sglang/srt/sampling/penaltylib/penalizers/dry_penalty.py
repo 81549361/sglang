@@ -46,7 +46,7 @@ class BatchedDryPenalizer(_BatchedPenalizer):
             device=device,
         )
 
-        self.sequence_breakers = [
+        self.dry_sequence_breakerss = [
             [req.tokenizer.encode(f'a{prompt}', add_special_tokens=False)[-1] 
             for prompt in req.sampling_params.dry_sequence_breakers]
             for req in self.orchestrator.reqs()
