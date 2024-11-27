@@ -1,26 +1,26 @@
-"""
-Copyright 2023-2024 SGLang Team
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+# Copyright 2023-2024 SGLang Team
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
 
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
-
+import json
 import logging
-import os
 from enum import IntEnum, auto
-from typing import Optional
+from typing import List, Optional
 
 from transformers import PretrainedConfig
 
 from sglang.srt.hf_transformers_utils import get_config, get_context_length
+from sglang.srt.utils import get_bool_env_var
 
 logger = logging.getLogger(__name__)
 
@@ -38,26 +38,30 @@ class ModelConfig:
         revision: Optional[str] = None,
         context_length: Optional[int] = None,
         model_override_args: Optional[dict] = None,
+        is_embedding: Optional[bool] = None,
     ) -> None:
-        self.path = path
-        self.trust_remote_code = trust_remote_code
-        self.revision = revision
-        self.model_override_args = model_override_args
+        # Parse args
+        self.model_override_args = json.loads(model_override_args)
         self.hf_config = get_config(
-            self.path,
-            trust_remote_code,
-            revision,
-            model_override_args=model_override_args,
+            path,
+            trust_remote_code=trust_remote_code,
+            revision=revision,
+            model_override_args=self.model_override_args,
         )
         self.hf_text_config = get_hf_text_config(self.hf_config)
-        derived_context_len = get_context_length(self.hf_text_config)
-        allow_long_context = os.environ.get(
-            "SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN", None
-        )
 
+        # Check model type
+        self.is_generation = is_generation_model(
+            self.hf_config.architectures, is_embedding
+        )
+        self.is_multimodal = is_multimodal_model(self.hf_config.architectures)
+        self.is_encoder_decoder = is_encoder_decoder_model(self.hf_config.architectures)
+
+        # Derive context length
+        derived_context_len = get_context_length(self.hf_text_config)
         if context_length is not None:
             if context_length > derived_context_len:
-                if allow_long_context:
+                if get_bool_env_var("SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN"):
                     logger.warning(
                         f"Warning: User-specified context_length ({context_length}) is greater than the derived context_length ({derived_context_len}). "
                         f"This may lead to incorrect model outputs or CUDA errors."
@@ -81,7 +85,7 @@ class ModelConfig:
             self.hf_text_config.hidden_size // self.hf_text_config.num_attention_heads,
         )
 
-        # FIXME: temporary special judge for deepseek v2 MLA architecture
+        # FIXME: temporary special judge for MLA architecture
         if "DeepseekV2ForCausalLM" in self.hf_config.architectures:
             self.head_dim = 256
             self.attention_arch = AttentionArch.MLA
@@ -111,8 +115,6 @@ class ModelConfig:
         self.hidden_size = self.hf_text_config.hidden_size
         self.num_hidden_layers = self.hf_text_config.num_hidden_layers
         self.vocab_size = self.hf_text_config.vocab_size
-
-        self.is_encoder_decoder = self.hf_config.model_type in ["mllama"]
 
     # adapted from https://github.com/vllm-project/vllm/blob/main/vllm/config.py#L289
     def get_total_num_kv_heads(self) -> int:
@@ -163,7 +165,6 @@ class ModelConfig:
         # equal to the number of attention heads.
         return self.hf_text_config.num_attention_heads
 
-    # adapted from https://github.com/vllm-project/vllm/blob/main/vllm/config.py#L328
     def get_num_kv_heads(self, tensor_parallel_size) -> int:
         """Returns the number of KV heads per GPU."""
         total_num_kv_heads = self.get_total_num_kv_heads()
@@ -192,3 +193,38 @@ def get_hf_text_config(config: PretrainedConfig):
         return config.text_config
     else:
         return config
+
+
+def is_generation_model(model_architectures: List[str], is_embedding: bool = False):
+    # We have two ways to determine whether a model is a generative model.
+    # 1. Check the model architectue
+    # 2. check the `is_embedding` server args
+
+    if (
+        "LlamaEmbeddingModel" in model_architectures
+        or "MistralModel" in model_architectures
+        or "LlamaForSequenceClassification" in model_architectures
+        or "LlamaForSequenceClassificationWithNormal_Weights" in model_architectures
+        or "InternLM2ForRewardModel" in model_architectures
+    ):
+        return False
+    else:
+        return not is_embedding
+
+
+def is_multimodal_model(model_architectures: List[str]):
+    if (
+        "LlavaLlamaForCausalLM" in model_architectures
+        or "LlavaQwenForCausalLM" in model_architectures
+        or "LlavaMistralForCausalLM" in model_architectures
+        or "LlavaVidForCausalLM" in model_architectures
+        or "MllamaForConditionalGeneration" in model_architectures
+        or "Qwen2VLForConditionalGeneration" in model_architectures
+    ):
+        return True
+    else:
+        return False
+
+
+def is_encoder_decoder_model(model_architectures: List[str]):
+    return "MllamaForConditionalGeneration" in model_architectures

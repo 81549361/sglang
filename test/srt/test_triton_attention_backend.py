@@ -1,4 +1,8 @@
-import subprocess
+"""
+Usage:
+python3 -m unittest test_triton_attention_backend.TestTritonAttnBackend.test_mmlu
+"""
+
 import unittest
 from types import SimpleNamespace
 
@@ -10,13 +14,13 @@ from sglang.test.test_utils import (
     DEFAULT_URL_FOR_TEST,
     is_in_ci,
     popen_launch_server,
-    run_bench_latency,
+    run_bench_one_batch,
 )
 
 
 class TestTritonAttnBackend(unittest.TestCase):
     def test_latency(self):
-        output_throughput = run_bench_latency(
+        output_throughput = run_bench_one_batch(
             DEFAULT_MODEL_NAME_FOR_TEST,
             [
                 "--attention-backend",
@@ -48,7 +52,7 @@ class TestTritonAttnBackend(unittest.TestCase):
             )
 
             metrics = run_eval(args)
-            assert metrics["score"] >= 0.65
+            self.assertGreaterEqual(metrics["score"], 0.65)
         finally:
             kill_child_process(process.pid, include_self=True)
 

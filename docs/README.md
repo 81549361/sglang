@@ -1,4 +1,5 @@
 # SGLang Documentation
+This is the documentation repository for SGLang. It is auto-generated from https://github.com/sgl-project/sglang/tree/main/docs.
 
 ## Build the documentation website
 
@@ -20,6 +21,7 @@ make clean
 
 ### Serve (preview)
 Run an HTTP server and visit http://localhost:8000 in your browser.
+
 ```
 python3 -m http.server --d _build/html
 ```

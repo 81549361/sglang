@@ -23,7 +23,7 @@
 # limitations under the License.
 """Inference-only Qwen2-VL model compatible with HuggingFace weights."""
 from functools import lru_cache, partial
-from typing import Iterable, List, Mapping, Optional, Tuple, Type, TypedDict, Union
+from typing import Iterable, List, Optional, Tuple, Type, TypedDict
 
 import numpy as np
 import torch
@@ -35,9 +35,7 @@ from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import QuickGELU
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import SupportsMultiModal
 
 from sglang.srt.configs import Qwen2VLConfig, Qwen2VLVisionConfig
 from sglang.srt.hf_transformers_utils import get_processor
@@ -46,7 +44,9 @@ from sglang.srt.layers.attention.triton_ops.prefill_attention import (
 )
 from sglang.srt.layers.linear import ColumnParallelLinear, RowParallelLinear
 from sglang.srt.layers.logits_processor import LogitsProcessor
+from sglang.srt.layers.pooler import Pooler, PoolingType
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
+from sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead
 from sglang.srt.managers.schedule_batch import ImageInputs
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.models.qwen2 import Qwen2Model
@@ -58,27 +58,27 @@ logger = init_logger(__name__)
 
 class Qwen2VLImageInputs(TypedDict):
     pixel_values: torch.Tensor
-    """Shape: 
+    """Shape:
     `(num_patches, num_channels * patch_size * patch_size)`
     """
 
     image_grid_thw: torch.Tensor
     """Shape: `(num_images, 3)`
-    
+
     This should be in `(grid_t, grid_h, grid_w)` format.
     """
 
 
 class Qwen2VLVideoInputs(TypedDict):
     pixel_values_videos: torch.Tensor
-    """Shape: 
-    `(num_patches, 
+    """Shape:
+    `(num_patches,
       num_channels * temporal_patch_size * patch_size * patch_size)`
     """
 
     video_grid_thw: torch.Tensor
     """Shape: `(num_videos, 3)`
-    
+
     This should be in `(grid_t, grid_h, grid_w)` format.
     """
 
@@ -486,7 +486,7 @@ class Qwen2VisionTransformer(nn.Module):
 cached_get_processor = lru_cache(get_processor)
 
 
-class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
+class Qwen2VLForConditionalGeneration(nn.Module):
     def calculate_num_image_tokens(self, image_grid_thw: Tuple[int, int, int]):
         processor = cached_get_processor(self.config._name_or_path)
         grid_t, grid_h, grid_w = image_grid_thw
@@ -536,15 +536,12 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
     def __init__(
         self,
         config: Qwen2VLConfig,
-        multimodal_config: MultiModalConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
 
         self.config = config
-        self.multimodal_config = multimodal_config
-
         self.visual = Qwen2VisionTransformer(
             config.vision_config,
             norm_eps=getattr(config, "rms_norm_eps", 1e-6),
@@ -563,6 +560,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
             )
 
         self.logits_processor = LogitsProcessor(config)
+        self.pooler = Pooler(pooling_type=PoolingType.LAST, normalize=True)
 
     def _process_image_input(self, image_input: Qwen2VLImageInputs) -> torch.Tensor:
         pixel_values = image_input["pixel_values"].type(self.visual.dtype)
@@ -581,6 +579,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         forward_batch: ForwardBatch,
+        get_embedding: bool = False,
     ):
         """Run forward pass for Qwen2-VL.
 
@@ -603,8 +602,8 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
             image_inputs = [
                 img for img in forward_batch.image_inputs if img is not None
             ]
-
-        positions = forward_batch.mrope_positions
+        if getattr(self.config, "rope_scaling", {}).get("type", None) == "mrope":
+            positions = forward_batch.mrope_positions
         if (
             forward_batch.forward_mode.is_decode()
             or image_inputs is None
@@ -620,9 +619,9 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
 
             inputs_embeds = self.model.embed_tokens(input_ids)
             extend_start_loc_cpu = forward_batch.extend_start_loc.cpu().numpy()
-            prefix_lens_cpu = forward_batch.extend_prefix_lens.cpu().numpy()
+            prefix_lens_cpu = forward_batch.extend_prefix_lens_cpu
             for i, image in enumerate(forward_batch.image_inputs):
-                if image == None:
+                if image is None:
                     continue
                 start_idx = extend_start_loc_cpu[i]
                 prefix_len = prefix_lens_cpu[i]
@@ -653,17 +652,19 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
                     ]
                     image_embeds_offset += num_image_tokens
 
-            input_ids = None
-
         hidden_states = self.model(
             input_ids=input_ids,
             positions=positions,
             forward_batch=forward_batch,
             input_embeds=inputs_embeds,
         )
-        return self.logits_processor(
-            input_ids, hidden_states, self.lm_head.weight, forward_batch
-        )
+
+        if not get_embedding:
+            return self.logits_processor(
+                input_ids, hidden_states, self.lm_head.weight, forward_batch
+            )
+        else:
+            return self.pooler(hidden_states, forward_batch)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [

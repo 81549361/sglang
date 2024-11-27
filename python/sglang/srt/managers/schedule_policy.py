@@ -1,18 +1,16 @@
-"""
-Copyright 2023-2024 SGLang Team
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
-
+# Copyright 2023-2024 SGLang Team
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
 """Request scheduler policy"""
 
 import os
@@ -45,9 +43,15 @@ class SchedulePolicy:
         self.tree_cache = tree_cache
 
     def calc_priority(self, waiting_queue: List[Req]):
+        if len(waiting_queue) > 128 and self.policy == "lpm":
+            # Turn off the expensive prefix matching and sorting when the #queue is large.
+            policy = "fcfs"
+        else:
+            policy = self.policy
+
         # Compute matched prefix length
         prefix_computed = False
-        if self.policy == "lpm" or self.policy == "dfs-weight":
+        if policy == "lpm" or policy == "dfs-weight":
             for r in waiting_queue:
                 # NOTE: the prefix_indices must always be aligned with last_node
                 r.prefix_indices, r.last_node = self.tree_cache.match_prefix(
@@ -56,18 +60,18 @@ class SchedulePolicy:
 
             prefix_computed = True
 
-        if self.policy == "lpm":
+        if policy == "lpm":
             # Longest Prefix Match
             waiting_queue.sort(key=lambda x: -len(x.prefix_indices))
-        elif self.policy == "fcfs":
+        elif policy == "fcfs":
             # first come first serve
             pass
-        elif self.policy == "lof":
+        elif policy == "lof":
             # longest output first
             waiting_queue.sort(key=lambda x: -x.sampling_params.max_new_tokens)
-        elif self.policy == "random":
+        elif policy == "random":
             random.shuffle(waiting_queue)
-        elif self.policy == "dfs-weight":
+        elif policy == "dfs-weight":
             last_node_to_reqs = defaultdict(list)
             for req in waiting_queue:
                 last_node_to_reqs[req.last_node].append(req)
@@ -85,7 +89,7 @@ class SchedulePolicy:
                 waiting_queue,
             )
         else:
-            raise ValueError(f"Unknown schedule_policy: {self.policy}")
+            raise ValueError(f"Unknown schedule_policy: {policy=}")
 
         return prefix_computed
 
@@ -296,7 +300,11 @@ class PrefillAdder:
             if (
                 self.rem_chunk_tokens is None
                 or input_tokens <= self.rem_chunk_tokens
-                or (req.return_logprob and req.normalized_prompt_logprob is None)
+                or (
+                    req.return_logprob
+                    and req.normalized_prompt_logprob is None
+                    and req.logprob_start_len != len(req.origin_input_ids) - 1
+                )
             ):
                 # Non-chunked prefill
                 self.can_run_list.append(req)
