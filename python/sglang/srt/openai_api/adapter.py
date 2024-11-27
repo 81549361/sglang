@@ -499,42 +499,39 @@ def v1_generate_request(
         if request.echo and request.logprobs:
             current_logprob_start_len = 0
         else:
-            num_reqs = 1
-        for i in range(num_reqs):
-            sampling_params.append(
-                {
-                    "temperature": request.temperature,
-                    "max_new_tokens": request.max_tokens,
-                    "min_new_tokens": request.min_tokens,
-                    "stop": request.stop,
-                    "stop_token_ids": request.stop_token_ids,
-                    "top_p": request.top_p,
-                    "presence_penalty": request.presence_penalty,
-                    "frequency_penalty": request.frequency_penalty,
-                    "repetition_penalty": request.repetition_penalty,
-                                        "min_p": request.min_p,
-                    "dry_multiplier": request.dry_multiplier,
-                    "dry_base": request.dry_base,
-                    "dry_allowed_length": request.dry_allowed_length,
-                    "dry_penalty_last_n": request.dry_penalty_last_n,
-                    "dry_sequence_breakers": request.dry_sequence_breakers,
-                    "xtc_threshold": request.xtc_threshold,
-                    "xtc_probability": request.xtc_probability,
-                    "regex": request.regex,
-                    "json_schema": request.json_schema,
-                    "n": request.n,
-                    "ignore_eos": request.ignore_eos,
-                    "no_stop_trim": (
-                        request.no_stop_trim
-                        if not isinstance(request.no_stop_trim, list)
-                        else request.no_stop_trim[i]
-                    ),
-                }
-            )
-        if num_reqs == 1:
-            sampling_params_list.append(sampling_params[0])
-        else:
-            sampling_params_list.append(sampling_params)
+            current_logprob_start_len = -1
+        sampling_params_list.append(
+            {
+                "temperature": request.temperature,
+                "max_new_tokens": request.max_tokens,
+                "min_new_tokens": request.min_tokens,
+                "stop": request.stop,
+                "stop_token_ids": request.stop_token_ids,
+                "top_p": request.top_p,
+                "presence_penalty": request.presence_penalty,
+                "frequency_penalty": request.frequency_penalty,
+                "repetition_penalty": request.repetition_penalty,
+                "min_p": request.min_p,
+                "dry_multiplier": request.dry_multiplier,
+                "dry_base": request.dry_base,
+                "dry_allowed_length": request.dry_allowed_length,
+                "dry_penalty_last_n": request.dry_penalty_last_n,
+                "dry_sequence_breakers": request.dry_sequence_breakers,
+                "xtc_threshold": request.xtc_threshold,
+                "xtc_probability": request.xtc_probability,
+                "regex": request.regex,
+                "json_schema": request.json_schema,
+                "n": request.n,
+                "no_stop_trim": request.no_stop_trim,
+                "ignore_eos": request.ignore_eos,
+                "skip_special_tokens": request.skip_special_tokens,
+            }
+        )
+        return_logprobs.append(request.logprobs is not None and request.logprobs > 0)
+        logprob_start_lens.append(current_logprob_start_len)
+        top_logprobs_nums.append(
+            request.logprobs if request.logprobs is not None else 0
+        )
 
     if len(all_requests) == 1:
         if isinstance(prompts[0], str) or isinstance(prompts[0][0], str):
@@ -933,10 +930,10 @@ def v1_chat_generate_request(
             "stop": stop,
             "stop_token_ids": request.stop_token_ids,
             "top_p": request.top_p,
-            "min_p": request.min_p,
             "presence_penalty": request.presence_penalty,
             "frequency_penalty": request.frequency_penalty,
             "repetition_penalty": request.repetition_penalty,
+            "min_p": request.min_p,
             "dry_multiplier": request.dry_multiplier,
             "dry_base": request.dry_base,
             "dry_allowed_length": request.dry_allowed_length,
