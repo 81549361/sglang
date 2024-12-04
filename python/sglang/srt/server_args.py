@@ -20,6 +20,9 @@ import random
 import tempfile
 from typing import List, Optional
 
+import torch
+
+from sglang.srt.hf_transformers_utils import check_gguf_file
 from sglang.srt.utils import (
     get_amdgpu_memory_capacity,
     get_nvgpu_memory_capacity,
@@ -49,6 +52,7 @@ class ServerArgs:
     served_model_name: Optional[str] = None
     chat_template: Optional[str] = None
     is_embedding: bool = False
+    revision: Optional[str] = None
 
     # Port
     host: str = "127.0.0.1"
@@ -58,7 +62,7 @@ class ServerArgs:
     mem_fraction_static: Optional[float] = None
     max_running_requests: Optional[int] = None
     max_total_tokens: Optional[int] = None
-    chunked_prefill_size: int = 8192
+    chunked_prefill_size: Optional[int] = None
     max_prefill_tokens: int = 16384
     schedule_policy: str = "lpm"
     schedule_conservativeness: float = 1.0
@@ -120,7 +124,7 @@ class ServerArgs:
     disable_jump_forward: bool = False
     disable_cuda_graph: bool = False
     disable_cuda_graph_padding: bool = False
-    disable_disk_cache: bool = False
+    disable_outlines_disk_cache: bool = False
     disable_custom_all_reduce: bool = False
     disable_mla: bool = False
     disable_overlap_schedule: bool = False
@@ -128,7 +132,7 @@ class ServerArgs:
     enable_dp_attention: bool = False
     enable_torch_compile: bool = False
     torch_compile_max_bs: int = 32
-    cuda_graph_max_bs: int = 160
+    cuda_graph_max_bs: Optional[int] = None
     torchao_config: str = ""
     enable_nan_detection: bool = False
     enable_p2p_check: bool = False
@@ -144,19 +148,23 @@ class ServerArgs:
         if self.served_model_name is None:
             self.served_model_name = self.model_path
 
-        if self.chunked_prefill_size <= 0:
-            # Disable chunked prefill
-            self.chunked_prefill_size = None
-
         if self.random_seed is None:
             self.random_seed = random.randint(0, 1 << 30)
 
-        # Mem fraction depends on the tensor parallelism size
+        if is_hip():
+            gpu_mem = get_amdgpu_memory_capacity()
+        elif torch.cuda.is_available():
+            gpu_mem = get_nvgpu_memory_capacity()
+        else:
+            # GPU memory is not known yet or no GPU is available.
+            gpu_mem = None
+
+        # Set mem fraction static, which depends on the tensor parallelism size
         if self.mem_fraction_static is None:
             if self.tp_size >= 16:
                 self.mem_fraction_static = 0.79
             elif self.tp_size >= 8:
-                self.mem_fraction_static = 0.82
+                self.mem_fraction_static = 0.81
             elif self.tp_size >= 4:
                 self.mem_fraction_static = 0.85
             elif self.tp_size >= 2:
@@ -164,25 +172,35 @@ class ServerArgs:
             else:
                 self.mem_fraction_static = 0.88
 
-        # Adjust for GPUs with small memory capacities
-        if is_hip():
-            gpu_mem = get_amdgpu_memory_capacity()
-        else:
-            gpu_mem = get_nvgpu_memory_capacity()
-        if gpu_mem < 25000:
-            self.chunked_prefill_size //= 4  # make it 2048
-            self.cuda_graph_max_bs = 4
-            logger.info("Automatically adjust --chunked-prefill-size for small GPUs.")
+        # Set chunked prefill size, which depends on the gpu memory capacity
+        if self.chunked_prefill_size is None:
+            if gpu_mem is not None and gpu_mem < 25_000:
+                self.chunked_prefill_size = 2048
+            else:
+                self.chunked_prefill_size = 8192
+
+        # Set cuda graph max batch size
+        if self.cuda_graph_max_bs is None:
+            if gpu_mem is not None and gpu_mem < 25_000:
+                self.cuda_graph_max_bs = 8
+            else:
+                self.cuda_graph_max_bs = 160
 
         # Choose kernel backends
-        if not is_flashinfer_available():
-            self.attention_backend = "triton"
-            self.sampling_backend = "pytorch"
-
         if self.attention_backend is None:
-            self.attention_backend = "flashinfer"
+            self.attention_backend = (
+                "flashinfer" if is_flashinfer_available() else "triton"
+            )
         if self.sampling_backend is None:
-            self.sampling_backend = "flashinfer"
+            self.sampling_backend = (
+                "flashinfer" if is_flashinfer_available() else "pytorch"
+            )
+
+        if self.attention_backend == "torch_native":
+            logger.warning(
+                "Cuda graph is disabled because of using torch native attention backend"
+            )
+            self.disable_cuda_graph = True
 
         # Others
         if self.enable_dp_attention:
@@ -191,13 +209,19 @@ class ServerArgs:
             self.cuda_graph_max_bs = min(self.cuda_graph_max_bs, 96)
             self.schedule_conservativeness = self.schedule_conservativeness * 0.3
             self.disable_overlap_schedule = True
-            logger.info(
+            logger.warning(
                 f"DP attention is enabled. The chunked prefill size is adjusted to {self.chunked_prefill_size} to avoid MoE kernel issues. "
                 f"The CUDA graph max batch size is adjusted to {self.cuda_graph_max_bs}. "
                 f"The schedule conservativeness is adjusted to {self.schedule_conservativeness}. "
                 "Data parallel size is adjusted to be the same as tensor parallel size. "
-                "Overlap schedule is disabled."
+                "Overlap scheduler is disabled."
             )
+
+        # GGUF
+        if (
+            self.load_format == "auto" or self.load_format == "gguf"
+        ) and check_gguf_file(self.model_path):
+            self.quantization = self.load_format = "gguf"
 
     @staticmethod
     def add_cli_args(parser: argparse.ArgumentParser):
@@ -238,7 +262,7 @@ class ServerArgs:
             "--load-format",
             type=str,
             default=ServerArgs.load_format,
-            choices=["auto", "pt", "safetensors", "npcache", "dummy"],
+            choices=["auto", "pt", "safetensors", "npcache", "dummy", "gguf"],
             help="The format of the model weights to load. "
             '"auto" will try to load the weights in the safetensors format '
             "and fall back to the pytorch bin format if safetensors format "
@@ -248,7 +272,8 @@ class ServerArgs:
             '"npcache" will load the weights in pytorch format and store '
             "a numpy cache to speed up the loading. "
             '"dummy" will initialize the weights with random values, '
-            "which is mainly for profiling.",
+            "which is mainly for profiling."
+            '"gguf" will load the weights in the gguf format. ',
         )
         parser.add_argument(
             "--trust-remote-code",
@@ -288,6 +313,7 @@ class ServerArgs:
                 "gptq_marlin",
                 "awq_marlin",
                 "bitsandbytes",
+                "gguf",
             ],
             help="The quantization method.",
         )
@@ -320,6 +346,14 @@ class ServerArgs:
             "--is-embedding",
             action="store_true",
             help="Whether to use a CausalLM as an embedding model.",
+        )
+        parser.add_argument(
+            "--revision",
+            type=str,
+            default=None,
+            help="The specific model version to use. It can be a branch "
+            "name, a tag name, or a commit id. If unspecified, will use "
+            "the default version.",
         )
 
         # Memory and scheduling
@@ -572,7 +606,7 @@ class ServerArgs:
         parser.add_argument(
             "--attention-backend",
             type=str,
-            choices=["flashinfer", "triton"],
+            choices=["flashinfer", "triton", "torch_native"],
             default=ServerArgs.attention_backend,
             help="Choose the kernels for attention layers.",
         )
@@ -613,9 +647,9 @@ class ServerArgs:
             help="Disable cuda graph when padding is needed. Still uses cuda graph when padding is not needed.",
         )
         parser.add_argument(
-            "--disable-disk-cache",
+            "--disable-outlines-disk-cache",
             action="store_true",
-            help="Disable disk cache to avoid possible crashes related to file system or high concurrency.",
+            help="Disable disk cache of outlines to avoid possible crashes related to file system or high concurrency.",
         )
         parser.add_argument(
             "--disable-custom-all-reduce",
@@ -715,6 +749,11 @@ class ServerArgs:
             "--disable-flashinfer-sampling",
             action=DeprecatedAction,
             help="'--disable-flashinfer-sampling' is deprecated. Please use '--sampling-backend pytroch' instead.",
+        )
+        parser.add_argument(
+            "--disable-disk-cache",
+            action=DeprecatedAction,
+            help="'--disable-disk-cache' is deprecated. Please use '--disable-outlines-disk-cache' instead.",
         )
 
     @classmethod

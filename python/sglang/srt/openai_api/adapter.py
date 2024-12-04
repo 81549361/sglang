@@ -486,6 +486,7 @@ def v1_generate_request(
     return_logprobs = []
     logprob_start_lens = []
     top_logprobs_nums = []
+    lora_paths = []
 
     for request in all_requests:
         # NOTE: with openai API, the prompt's logprobs are always not computed
@@ -496,6 +497,7 @@ def v1_generate_request(
             )
 
         prompts.append(request.prompt)
+        lora_paths.append(request.lora_path)
         if request.echo and request.logprobs:
             current_logprob_start_len = 0
         else:
@@ -527,7 +529,7 @@ def v1_generate_request(
                 "skip_special_tokens": request.skip_special_tokens,
             }
         )
-        return_logprobs.append(request.logprobs is not None and request.logprobs > 0)
+        return_logprobs.append(request.logprobs is not None)
         logprob_start_lens.append(current_logprob_start_len)
         top_logprobs_nums.append(
             request.logprobs if request.logprobs is not None else 0
@@ -542,6 +544,7 @@ def v1_generate_request(
         return_logprobs = return_logprobs[0]
         logprob_start_lens = logprob_start_lens[0]
         top_logprobs_nums = top_logprobs_nums[0]
+        lora_paths = lora_paths[0]
     else:
         if isinstance(prompts[0], str) or isinstance(prompts[0][0], str):
             prompt_kwargs = {"text": prompts}
@@ -557,6 +560,7 @@ def v1_generate_request(
         return_text_in_logprobs=True,
         stream=all_requests[0].stream,
         rid=request_ids,
+        lora_path=lora_paths,
     )
 
     return adapted_request, all_requests if len(all_requests) > 1 else all_requests[0]
@@ -599,9 +603,9 @@ def v1_generate_response(request, ret, tokenizer_manager, to_file=False):
             text = prompts[prompt_index] + text
 
         logprobs = False
-        if isinstance(request, list) and request[idx].logprobs:
+        if isinstance(request, list) and request[idx].logprobs is not None:
             logprobs = True
-        elif (not isinstance(request, list)) and request.logprobs:
+        elif (not isinstance(request, list)) and request.logprobs is not None:
             logprobs = True
         if logprobs:
             if echo:
@@ -743,7 +747,7 @@ async def v1_completions(tokenizer_manager, raw_request: Request):
                             # Prepend prompt in response text.
                             text = prompts + text
 
-                    if request.logprobs:
+                    if request.logprobs is not None:
                         # The first chunk and echo is enabled.
                         if not stream_buffer and request.echo:
                             input_token_logprobs = content["meta_info"][
@@ -1291,7 +1295,7 @@ def v1_embedding_request(all_requests, tokenizer_manager):
     for request in all_requests:
         prompt = request.input
         assert (
-            type(prompt) == first_prompt_type
+            type(prompt) is first_prompt_type
         ), "All prompts must be of the same type in file input settings"
         prompts.append(prompt)
 
@@ -1302,7 +1306,7 @@ def v1_embedding_request(all_requests, tokenizer_manager):
         else:
             prompt_kwargs = {"input_ids": prompt}
     else:
-        if isinstance(prompts[0], str) or isinstance(propmts[0][0], str):
+        if isinstance(prompts[0], str) or isinstance(prompts[0][0], str):
             prompt_kwargs = {"text": prompts}
         else:
             prompt_kwargs = {"input_ids": prompts}

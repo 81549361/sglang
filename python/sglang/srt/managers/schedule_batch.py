@@ -124,7 +124,7 @@ class FINISH_ABORT(BaseFinishReason):
 class ImageInputs:
     """The image related inputs."""
 
-    pixel_values: torch.Tensor
+    pixel_values: Union[torch.Tensor, np.array]
     image_hashes: Optional[list] = None
     image_sizes: Optional[list] = None
     image_offsets: Optional[list] = None
@@ -132,7 +132,7 @@ class ImageInputs:
     modalities: Optional[list] = None
     num_image_tokens: Optional[int] = None
 
-    image_embeds: Optional[List[torch.Tensor]] = None
+    # Llava related
     aspect_ratio_ids: Optional[List[torch.Tensor]] = None
     aspect_ratio_mask: Optional[List[torch.Tensor]] = None
 
@@ -141,19 +141,17 @@ class ImageInputs:
     mrope_position_delta: Optional[torch.Tensor] = None
 
     @staticmethod
-    def from_dict(obj, vocab_size):
-        # Use image hash as fake token_ids, which is then used for prefix matching
+    def from_dict(obj: dict):
         ret = ImageInputs(
             pixel_values=obj["pixel_values"],
-            image_hashes=hash(tuple(obj["image_hashes"])),
+            image_hashes=obj["image_hashes"],
         )
-        image_hash = ret.image_hashes
-        ret.pad_values = [
-            (image_hash) % vocab_size,
-            (image_hash >> 16) % vocab_size,
-            (image_hash >> 32) % vocab_size,
-            (image_hash >> 64) % vocab_size,
-        ]
+
+        # Use image hash as fake token_ids. We use this as the key for prefix matching in the radix cache.
+        # Please note that if the `input_ids` is later used in the model forward,
+        # you also need to clamp the values within the range of [0, vocab_size) to avoid out-of-bound
+        # errors in cuda kernels. See also llava.py for example.
+        ret.pad_values = [x % (1 << 30) for x in ret.image_hashes]
 
         optional_args = [
             "image_sizes",
@@ -168,17 +166,16 @@ class ImageInputs:
 
         return ret
 
-    def merge(self, other, vocab_size):
+    def merge(self, other):
         assert self.pixel_values.shape[1:] == other.pixel_values.shape[1:]
         self.pixel_values = np.concatenate([self.pixel_values, other.pixel_values])
-        self.image_hashes += other.image_hashes
 
-        self.pad_values = [
-            (self.image_hashes) % vocab_size,
-            (self.image_hashes >> 16) % vocab_size,
-            (self.image_hashes >> 32) % vocab_size,
-            (self.image_hashes >> 64) % vocab_size,
-        ]
+        # Use image hash as fake token_ids. We use this as the key for prefix matching in the radix cache.
+        # Please note that if the `input_ids` is later used in the model forward,
+        # you also need to clamp the values within the range of [0, vocab_size) to avoid out-of-bound
+        # errors in cuda kernels. See also llava.py for example.
+        self.image_hashes += other.image_hashes
+        self.pad_values = [x % (1 << 30) for x in self.image_hashes]
 
         optional_args = [
             "image_sizes",
@@ -231,6 +228,7 @@ class Req:
         self.tokenizer = None
         self.finished_reason = None
         self.stream = False
+        self.to_abort = False
 
         # For incremental decoding
         # ----- | --------- read_ids -------|
@@ -290,11 +288,11 @@ class Req:
         # The number of cached tokens, that were already cached in the KV cache
         self.cached_tokens = 0
 
-    def extend_image_inputs(self, image_inputs, vocab_size):
+    def extend_image_inputs(self, image_inputs):
         if self.image_inputs is None:
             self.image_inputs = image_inputs
         else:
-            self.image_inputs.merge(image_inputs, vocab_size)
+            self.image_inputs.merge(image_inputs)
 
     # whether request reached finished condition
     def finished(self) -> bool:
@@ -366,6 +364,10 @@ class Req:
 
     def check_finished(self):
         if self.finished():
+            return
+
+        if self.to_abort:
+            self.finished_reason = FINISH_ABORT()
             return
 
         if len(self.output_ids) >= self.sampling_params.max_new_tokens:
@@ -741,20 +743,24 @@ class ScheduleBatch:
         extend_lens = torch.tensor(self.extend_lens, dtype=torch.int32).to(
             self.device, non_blocking=True
         )
-        write_req_to_token_pool_triton[(bs,)](
-            self.req_to_token_pool.req_to_token,
-            self.req_pool_indices,
-            pre_lens,
-            self.seq_lens,
-            extend_lens,
-            self.out_cache_loc,
-            self.req_to_token_pool.req_to_token.shape[1],
-        )
-        # The triton kernel is equivalent to the following python code.
-        # self.req_to_token_pool.write(
-        #    (req.req_pool_idx, slice(pre_len, seq_len)),
-        #    out_cache_loc[pt : pt + req.extend_input_len],
-        # )
+        if global_server_args_dict["attention_backend"] != "torch_native":
+            write_req_to_token_pool_triton[(bs,)](
+                self.req_to_token_pool.req_to_token,
+                self.req_pool_indices,
+                pre_lens,
+                self.seq_lens,
+                extend_lens,
+                self.out_cache_loc,
+                self.req_to_token_pool.req_to_token.shape[1],
+            )
+        else:
+            pt = 0
+            for i in range(bs):
+                self.req_to_token_pool.write(
+                    (self.req_pool_indices[i], slice(pre_lens[i], self.seq_lens[i])),
+                    self.out_cache_loc[pt : pt + self.extend_lens[i]],
+                )
+                pt += self.extend_lens[i]
         # TODO: some tensors can be reused for ForwardBatchInfo (e.g., extend_lens, cumsum_start)
 
         if self.model_config.is_encoder_decoder:
