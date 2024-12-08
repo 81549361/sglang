@@ -43,7 +43,7 @@ if __name__ == "__main__":
             return response
         except Exception as e:
             print(f"Error registering service to Nacos: {e}")
-            #return False
+            return True
     try:
         # 创建配置解析器
         config = configparser.ConfigParser()
