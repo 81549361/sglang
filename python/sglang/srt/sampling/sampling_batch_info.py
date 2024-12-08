@@ -89,6 +89,7 @@ class SamplingBatchInfo:
             # We will support them later.
             penalizers = {
                 penaltylib.BatchedMinNewTokensPenalizer,
+                penaltylib.BatchedDryPenalizer,
             }
             if (
                 any(req.sampling_params.frequency_penalty != 0.0 for req in reqs)
