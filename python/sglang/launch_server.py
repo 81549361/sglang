@@ -57,10 +57,9 @@ if __name__ == "__main__":
         client = nacos.NacosClient(NACOS_SERVER, namespace=NAMESPACE, username=config['nacos']['username'], password=config['nacos']['password'])
         SERVICE_NAME = config['nacos']['service_name']
         HEALTH_CHECK_INTERVAL = int(config['nacos']['health_check_interval'])
-        HTTP_PROXY = config['server']['http_proxy']
+        HTTP_PROXY = config.getboolean('server', 'http_proxy')
         DOMAIN = config['server']['domain']
         PROTOCOL = config['server']['protocol']
-
         # Parse AutoDLServiceURL
         autodl_url = os.environ.get('AutoDLServiceURL')
         AutoDLContainerUUID = os.environ.get('AutoDLContainerUUID')
