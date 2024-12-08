@@ -13,7 +13,6 @@ from urllib.parse import urlparse
 
 if __name__ == "__main__":
     server_args = prepare_server_args(sys.argv[1:])
-    print(server_args)
     def register_service(client,service_name,service_ip,service_port,cluster_name,health_check_interval,weight):
         try:
             metadata = {"model":server_args.served_model_name,"port":server_args.port}
