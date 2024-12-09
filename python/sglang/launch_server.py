@@ -57,6 +57,7 @@ if __name__ == "__main__":
         client = nacos.NacosClient(NACOS_SERVER, namespace=NAMESPACE, username=config['nacos']['username'], password=config['nacos']['password'])
         SERVICE_NAME = config['nacos']['service_name']
         HEALTH_CHECK_INTERVAL = int(config['nacos']['health_check_interval'])
+        WEIGHT = int(config['nacos']['weight'])
         HTTP_PROXY = config.getboolean('server', 'http_proxy')
         DOMAIN = config['server']['domain']
         PROTOCOL = config['server']['protocol']
@@ -69,7 +70,6 @@ if __name__ == "__main__":
         parsed_url = urlparse(autodl_url)
         SERVICE_IP = parsed_url.hostname
         SERVICE_PORT = parsed_url.port
-        WEIGHT = 1
         if not SERVICE_IP or not SERVICE_PORT:
             raise RuntimeError("Error: Invalid AutoDLServiceURL format.")
 
@@ -79,4 +79,8 @@ if __name__ == "__main__":
         
         launch_server(server_args)
     finally:
+        try:
+            client.remove_naming_instance(SERVICE_NAME, SERVICE_IP, SERVICE_PORT, CLUSTER_NAME)
+        finally:
+            pass 
         kill_process_tree(os.getpid(), include_parent=False)
