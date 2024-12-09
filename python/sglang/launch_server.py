@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 
 if __name__ == "__main__":
     server_args = prepare_server_args(sys.argv[1:])
-    def register_service(client,service_name,service_ip,service_port,cluster_name,health_check_interval,weight,http_proxy,domain,protocol):
+    def register_service(client,service_name,service_ip,service_port,cluster_name,health_check_interval,weight,http_proxy,domain,protocol,direct_domain):
         try:
             # 初始化 metadata
             metadata = {
@@ -24,7 +24,10 @@ if __name__ == "__main__":
             # 如果 http_proxy 为 True，添加额外的 metadata 键值对
             if http_proxy:
                 metadata["http_proxy"] = True
-                metadata["domain"] = f"{domain}/port/{service_port}"
+                if direct_domain:
+                    metadata["domain"] = f"{protocol}://{service_ip}:{service_port}"
+                else:
+                    metadata["domain"] = f"{domain}/port/{service_port}"
             else:
                 metadata["http_proxy"] = False
                 metadata["domain"] = f"{protocol}://{service_ip}:{service_port}"
@@ -61,6 +64,7 @@ if __name__ == "__main__":
         HTTP_PROXY = config.getboolean('server', 'http_proxy')
         DOMAIN = config['server']['domain']
         PROTOCOL = config['server']['protocol']
+        DIRECT_DOMAIN = config['server']['direct_domain']
         # Parse AutoDLServiceURL
         autodl_url = os.environ.get('AutoDLServiceURL')
         AutoDLContainerUUID = os.environ.get('AutoDLContainerUUID')
@@ -74,7 +78,7 @@ if __name__ == "__main__":
             raise RuntimeError("Error: Invalid AutoDLServiceURL format.")
 
         print(f"Service will be registered with IP: {SERVICE_IP} and Port: {SERVICE_PORT}")
-        if not register_service(client,SERVICE_NAME,SERVICE_IP,SERVICE_PORT,CLUSTER_NAME,HEALTH_CHECK_INTERVAL,WEIGHT,HTTP_PROXY,DOMAIN,PROTOCOL):
+        if not register_service(client,SERVICE_NAME,SERVICE_IP,SERVICE_PORT,CLUSTER_NAME,HEALTH_CHECK_INTERVAL,WEIGHT,HTTP_PROXY,DOMAIN,PROTOCOL,DIRECT_DOMAIN):
             raise RuntimeError("Service is healthy but failed to register.")
         
         launch_server(server_args)
