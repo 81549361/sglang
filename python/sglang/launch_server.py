@@ -60,7 +60,10 @@ if __name__ == "__main__":
         client = nacos.NacosClient(NACOS_SERVER, namespace=NAMESPACE, username=config['nacos']['username'], password=config['nacos']['password'])
         SERVICE_NAME = config['nacos']['service_name']
         HEALTH_CHECK_INTERVAL = int(config['nacos']['health_check_interval'])
-        WEIGHT = int(config.get('nacos', {}).get('weight', 1))
+        if config.has_option('nacos', 'weight'):
+            WEIGHT = int(config.get('nacos', 'weight'))
+        else:
+            WEIGHT = 1
         HTTP_PROXY = config.getboolean('server', 'http_proxy')
         DOMAIN = config['server']['domain']
         PROTOCOL = config['server']['protocol']
