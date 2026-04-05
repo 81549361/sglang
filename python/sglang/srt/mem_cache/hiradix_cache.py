@@ -34,7 +34,9 @@ from sglang.srt.mem_cache.memory_pool_host import (
     MHATokenToKVPoolHost,
     MLATokenToKVPoolHost,
     NSATokenToKVPoolHost,
+    SWAHostKVCache,
 )
+from sglang.srt.mem_cache.swa_memory_pool import SWAKVPool
 from sglang.srt.mem_cache.radix_cache import (
     RadixCache,
     RadixKey,
@@ -60,7 +62,16 @@ class HiRadixCache(RadixCache):
         self.page_size = params.page_size
         self.kv_cache = params.token_to_kv_pool_allocator.get_kvcache()
 
-        if isinstance(self.kv_cache, MHATokenToKVPool):
+        if isinstance(self.kv_cache, SWAKVPool):
+            self.token_to_kv_pool_host = SWAHostKVCache(
+                self.kv_cache,
+                server_args.hicache_ratio,
+                server_args.hicache_size,
+                self.page_size,
+                server_args.hicache_mem_layout,
+                allocator_type=server_args.hicache_storage_backend,
+            )
+        elif isinstance(self.kv_cache, MHATokenToKVPool):
             self.token_to_kv_pool_host = MHATokenToKVPoolHost(
                 self.kv_cache,
                 server_args.hicache_ratio,
@@ -88,7 +99,9 @@ class HiRadixCache(RadixCache):
                 allocator_type=server_args.hicache_storage_backend,
             )
         else:
-            raise ValueError(f"HiRadixCache only supports MHA and MLA yet")
+            raise ValueError(
+                f"HiRadixCache does not support {type(self.kv_cache).__name__}"
+            )
 
         self.tp_group = params.tp_cache_group
         self.tp_world_size = torch.distributed.get_world_size(group=self.tp_group)
@@ -715,6 +728,21 @@ class HiRadixCache(RadixCache):
     def evictable_size(self):
         return self.evictable_size_
 
+    def full_evictable_size(self):
+        return self.evictable_size_
+
+    def swa_evictable_size(self):
+        return self.evictable_size_
+
+    def protected_size(self):
+        return self.protected_size_
+
+    def full_protected_size(self):
+        return self.protected_size_
+
+    def swa_protected_size(self):
+        return self.protected_size_
+
     def _to_radix_key(self, token_ids: List[int]) -> RadixKey:
         """Convert raw token_ids to a RadixKey for tree walking.
 
@@ -779,6 +807,28 @@ class HiRadixCache(RadixCache):
     def evict(self, params: EvictParams) -> EvictResult:
         start_time = time.perf_counter()
         num_tokens = params.num_tokens
+
+        # Drain completed writes before eviction so their nodes become
+        # unlocked and evictable immediately.
+        self.writing_check()
+
+        num_evicted = self._evict_loop(num_tokens)
+
+        # If the first pass could not free enough tokens (e.g. many nodes
+        # are still locked by in-flight write-through transfers), force-
+        # synchronize all pending writes and retry.
+        if (
+            num_evicted < num_tokens
+            and len(self.ongoing_write_through) > 0
+            and self.cache_controller.write_policy != "write_back"
+        ):
+            self._flush_write_through()
+            num_evicted += self._evict_loop(num_tokens - num_evicted)
+
+        self.update_eviction_metrics(num_evicted, start_time)
+        return EvictResult(num_tokens_evicted=num_evicted)
+
+    def _evict_loop(self, num_tokens: int) -> int:
         leaves = list(self.evictable_leaves)
         eviction_heap = [
             (self.eviction_strategy.get_priority(node), node) for node in leaves
@@ -795,7 +845,6 @@ class HiRadixCache(RadixCache):
 
             if not x.backuped:
                 if self.cache_controller.write_policy == "write_back":
-                    # write to host if the node is not backuped
                     num_evicted += self.write_backup(x, write_back=True)
                     write_back_nodes.append(x)
                 else:
@@ -809,7 +858,6 @@ class HiRadixCache(RadixCache):
                 if not child.evicted:
                     break
             else:
-                # all children are evicted or no children
                 new_priority = self.eviction_strategy.get_priority(x.parent)
                 heapq.heappush(eviction_heap, (new_priority, x.parent))
 
@@ -819,8 +867,20 @@ class HiRadixCache(RadixCache):
                 assert node.backuped
                 self._evict_backuped(node)
 
-        self.update_eviction_metrics(num_evicted, start_time)
-        return EvictResult(num_tokens_evicted=num_evicted)
+        return num_evicted
+
+    def _flush_write_through(self):
+        """Block until all in-flight write-through transfers complete,
+        then process their acks to unlock the corresponding nodes."""
+        for _, finish_event, ack_list in self.cache_controller.ack_write_queue:
+            finish_event.synchronize()
+            for ack_id in ack_list:
+                node = self.ongoing_write_through.pop(ack_id, None)
+                if node is not None:
+                    self.dec_lock_ref(node)
+                    if self.enable_storage:
+                        self.write_backup_storage(node)
+        self.cache_controller.ack_write_queue.clear()
 
     def _evict_backuped(self, node: TreeNode):
         # GPU -> CPU demotion: no BlockRemoved since block is still reachable via load_back

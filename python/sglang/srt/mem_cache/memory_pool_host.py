@@ -783,6 +783,156 @@ class MHATokenToKVPoolHost(HostKVCache):
         return ptr_list, element_size_list
 
 
+class SWAHostKVCache:
+    """Host-side KV cache for hybrid SWA models (e.g. Gemma 4).
+
+    Wraps two MHATokenToKVPoolHost instances (one for full-attention layers,
+    one for SWA layers) and presents a unified HostKVCache-like interface so
+    that HiCacheController can work without modification.
+
+    Both sub-pools share the same host index space: index *i* always refers
+    to slot *i* in both the full and SWA host pools.
+    """
+
+    def __init__(
+        self,
+        device_pool,  # SWAKVPool
+        host_to_device_ratio: float,
+        host_size: int,
+        page_size: int,
+        layout: str,
+        pin_memory: bool = True,
+        device: str = "cpu",
+        allocator_type: str = "default",
+    ):
+        from sglang.srt.mem_cache.swa_memory_pool import SWAKVPool
+
+        assert isinstance(device_pool, SWAKVPool)
+        self.device_pool = device_pool
+        self.page_size = page_size
+        self.layout = layout
+        self.pin_memory = pin_memory
+        self.device = device
+
+        self.full_host = MHATokenToKVPoolHost(
+            device_pool.full_kv_pool,
+            host_to_device_ratio,
+            host_size,
+            page_size,
+            layout,
+            pin_memory,
+            device,
+            allocator_type,
+        )
+        self.swa_host = MHATokenToKVPoolHost(
+            device_pool.swa_kv_pool,
+            host_to_device_ratio,
+            host_size,
+            page_size,
+            layout,
+            pin_memory,
+            device,
+            allocator_type,
+        )
+
+        self.size = min(self.full_host.size, self.swa_host.size)
+        self.start_layer = device_pool.full_kv_pool.start_layer
+        self.end_layer = device_pool.full_kv_pool.end_layer
+
+        self.lock = threading.RLock()
+        self.clear()
+
+    # -- allocator interface (shared index space) --
+
+    def available_size(self):
+        return len(self.free_slots)
+
+    @synchronized
+    def clear(self):
+        self.mem_state = torch.zeros(
+            (self.size,), dtype=torch.uint8, device=self.device
+        )
+        self.free_slots = torch.arange(self.size, dtype=torch.int64)
+
+    @synchronized
+    def alloc(self, need_size: int):
+        assert (
+            need_size % self.page_size == 0
+        ), "The requested size should be a multiple of the page size."
+        if need_size > self.available_size():
+            return None
+        select_index = self.free_slots[:need_size]
+        self.free_slots = self.free_slots[need_size:]
+        return select_index
+
+    @synchronized
+    def free(self, indices: torch.Tensor) -> int:
+        self.free_slots = torch.cat([self.free_slots, indices.cpu()])
+        return len(indices)
+
+    # -- transfer interface --
+
+    def _swa_indices(self, device_pool, device_indices: torch.Tensor) -> torch.Tensor:
+        """Translate full-pool device indices to SWA-pool indices (int64)."""
+        idx = device_pool.translate_loc_from_full_to_swa(device_indices)
+        if idx.dtype != torch.int64:
+            idx = idx.to(torch.int64)
+        return idx
+
+    def backup_from_device_all_layer(
+        self, device_pool, host_indices, device_indices, io_backend
+    ):
+        swa_device_indices = self._swa_indices(device_pool, device_indices)
+        self.full_host.backup_from_device_all_layer(
+            device_pool.full_kv_pool, host_indices, device_indices, io_backend
+        )
+        self.swa_host.backup_from_device_all_layer(
+            device_pool.swa_kv_pool, host_indices, swa_device_indices, io_backend
+        )
+
+    def load_to_device_per_layer(
+        self, device_pool, host_indices, device_indices, layer_id, io_backend
+    ):
+        local_layer_id, is_swa = device_pool.layers_mapping[layer_id]
+        if is_swa:
+            swa_device_indices = self._swa_indices(device_pool, device_indices)
+            self.swa_host.load_to_device_per_layer(
+                device_pool.swa_kv_pool,
+                host_indices,
+                swa_device_indices,
+                local_layer_id,
+                io_backend,
+            )
+        else:
+            self.full_host.load_to_device_per_layer(
+                device_pool.full_kv_pool,
+                host_indices,
+                device_indices,
+                local_layer_id,
+                io_backend,
+            )
+
+    # -- storage (L3) interface --
+
+    def get_data_page(self, index, flat: bool = True) -> torch.Tensor:
+        full_page = self.full_host.get_data_page(index, flat=True)
+        swa_page = self.swa_host.get_data_page(index, flat=True)
+        combined = torch.cat([full_page, swa_page])
+        return combined
+
+    def get_dummy_flat_data_page(self) -> torch.Tensor:
+        full_dummy = self.full_host.get_dummy_flat_data_page()
+        swa_dummy = self.swa_host.get_dummy_flat_data_page()
+        return torch.cat([full_dummy, swa_dummy])
+
+    def set_from_flat_data_page(self, index: int, data_page: torch.Tensor) -> None:
+        full_size = self.full_host.get_dummy_flat_data_page().numel()
+        full_page = data_page[:full_size]
+        swa_page = data_page[full_size:]
+        self.full_host.set_from_flat_data_page(index, full_page)
+        self.swa_host.set_from_flat_data_page(index, swa_page)
+
+
 class MLATokenToKVPoolHost(HostKVCache):
     device_pool: MLATokenToKVPool
 
@@ -1201,7 +1351,7 @@ class MambaPoolHost(HostKVCache):
             "page_first",
             "page_first_direct",
             "layer_first",
-        ], f"Unsupported layout: {layout}"
+        ], "Unsupported layout: {layout}"
 
         self.layout = layout
         self.pin_memory = pin_memory

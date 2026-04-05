@@ -261,6 +261,15 @@ is_sm100_supported = lru_cache(maxsize=1)(
         _check_cuda_device_version, device_capability_majors=[10], cuda_version=(12, 8)
     )
 )
+def _is_sm103_supported():
+    if not is_cuda():
+        return False
+    major, minor = torch.cuda.get_device_capability()
+    cuda_ver = tuple(map(int, torch.version.cuda.split(".")[:2]))
+    return major == 10 and minor >= 3 and cuda_ver >= (12, 8)
+
+
+is_sm103_supported = lru_cache(maxsize=1)(_is_sm103_supported)
 is_sm90_supported = lru_cache(maxsize=1)(
     partial(
         _check_cuda_device_version, device_capability_majors=[9], cuda_version=(12, 3)

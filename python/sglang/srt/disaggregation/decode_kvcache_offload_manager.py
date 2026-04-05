@@ -21,7 +21,9 @@ from sglang.srt.mem_cache.memory_pool import (
 from sglang.srt.mem_cache.memory_pool_host import (
     MHATokenToKVPoolHost,
     MLATokenToKVPoolHost,
+    SWAHostKVCache,
 )
+from sglang.srt.mem_cache.swa_memory_pool import SWAKVPool
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils.common import ceil_align
 
@@ -56,7 +58,15 @@ class DecodeKVCacheOffloadManager:
                 self.page_size, (env_stride // self.page_size) * self.page_size
             )
         kv_cache = self.token_to_kv_pool_allocator.get_kvcache()
-        if isinstance(kv_cache, MHATokenToKVPool):
+        if isinstance(kv_cache, SWAKVPool):
+            self.decode_host_mem_pool = SWAHostKVCache(
+                kv_cache,
+                server_args.hicache_ratio,
+                server_args.hicache_size,
+                self.page_size,
+                server_args.hicache_mem_layout,
+            )
+        elif isinstance(kv_cache, MHATokenToKVPool):
             self.decode_host_mem_pool = MHATokenToKVPoolHost(
                 kv_cache,
                 server_args.hicache_ratio,
@@ -73,7 +83,9 @@ class DecodeKVCacheOffloadManager:
                 server_args.hicache_mem_layout,
             )
         else:
-            raise ValueError("Unsupported KV cache type for decode offload")
+            raise ValueError(
+                f"Unsupported KV cache type for decode offload: {type(kv_cache).__name__}"
+            )
 
         self.tp_group = tp_group
         self.tp_world_size = torch.distributed.get_world_size(group=self.tp_group)

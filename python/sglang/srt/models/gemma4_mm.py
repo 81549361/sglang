@@ -29,6 +29,7 @@ from transformers import (
 )
 
 from sglang.srt.layers.attention.triton_backend import TritonAttnBackend
+from sglang.srt.layers.attention.utils import get_triton_backend, has_triton_backend
 from sglang.srt.layers.layernorm import Gemma4RMSNorm
 from sglang.srt.layers.linear import ReplicatedLinear
 from sglang.srt.layers.logits_processor import LogitsProcessor
@@ -255,7 +256,8 @@ class Gemma4ForConditionalGeneration(PreTrainedModel):
 
         TODO(kpham-sgl): Guard appropriately for gemma3_mm.py:prepare_attn_masks()
         """
-        if not isinstance(forward_batch.attn_backend, TritonAttnBackend):
+        triton_backend = get_triton_backend(forward_batch.attn_backend)
+        if triton_backend is None:
             logger.warning_once(
                 "Bidirectional attention for image tokens requires TritonAttnBackend. "
                 "Falling back to causal attention, which may degrade image quality."
@@ -329,10 +331,10 @@ class Gemma4ForConditionalGeneration(PreTrainedModel):
             )
         if bidirectional_attn_masks_list:
             bidirectional_attn_masks = torch.cat(bidirectional_attn_masks_list, dim=0)
-            forward_batch.attn_backend.forward_metadata.mask_indptr = (
+            triton_backend.forward_metadata.mask_indptr = (
                 bidirectional_attn_mask_indptr
             )
-            forward_batch.attn_backend.forward_metadata.custom_mask = (
+            triton_backend.forward_metadata.custom_mask = (
                 bidirectional_attn_masks
             )
 

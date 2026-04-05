@@ -177,6 +177,59 @@ def create_dual_chunk_flash_attn_backend(runner):
     return DualChunkFlashAttentionBackend(runner)
 
 
+def _has_heterogeneous_head_dim(runner: "ModelRunner") -> bool:
+    """True when SWA and full-attention layers use different head dimensions."""
+    mc = runner.model_config
+    if not mc.is_hybrid_swa or not mc.full_attention_layer_ids:
+        return False
+    return mc.swa_head_dim != mc.head_dim
+
+
+def _is_triton_backend(attn_backend: "AttentionBackend") -> bool:
+    from sglang.srt.layers.attention.triton_backend import TritonAttnBackend
+
+    return isinstance(attn_backend, TritonAttnBackend)
+
+
+def _wrap_heterogeneous_head_dim(
+    runner: "ModelRunner", primary_backend: "AttentionBackend"
+) -> "AttentionBackend":
+    """Wrap *primary_backend* so that large-head-dim layers fall back to Triton."""
+    from sglang.srt.layers.attention.hybrid_head_dim_attn_backend import (
+        HybridHeadDimAttnBackend,
+    )
+    from sglang.srt.layers.attention.triton_backend import TritonAttnBackend
+
+    mc = runner.model_config
+    fallback_layer_ids = set(mc.full_attention_layer_ids)
+
+    fallback_backend = TritonAttnBackend(runner)
+
+    # Multimodal models need Triton for all layers during extend/prefill
+    # to support custom attention masks (bidirectional attention for images).
+    extend_always_fallback = any(
+        "ForConditionalGeneration" in arch
+        for arch in (mc.hf_config.architectures or [])
+    )
+
+    n_swa = len(mc.swa_attention_layer_ids or [])
+    n_full = len(fallback_layer_ids)
+    pct = n_swa / (n_swa + n_full) * 100 if (n_swa + n_full) > 0 else 0
+    logger.info(
+        f"Heterogeneous head_dim detected (swa_head_dim={mc.swa_head_dim}, "
+        f"full_head_dim={mc.head_dim}). Using per-layer attention backend dispatch: "
+        f"{n_swa} SWA layers ({pct:.0f}%) -> primary backend, "
+        f"{n_full} full-attention layers -> Triton fallback."
+    )
+
+    return HybridHeadDimAttnBackend(
+        primary_backend=primary_backend,
+        fallback_backend=fallback_backend,
+        fallback_layer_ids=fallback_layer_ids,
+        extend_always_fallback=extend_always_fallback,
+    )
+
+
 def attn_backend_wrapper(runner: "ModelRunner", full_attn_backend: "AttentionBackend"):
     """
     Wrapper for special models like hybrid GDN, so we don't
@@ -232,6 +285,15 @@ def attn_backend_wrapper(runner: "ModelRunner", full_attn_backend: "AttentionBac
         return HybridLinearAttnBackend(
             full_attn_backend, linear_attn_backend, full_attn_layers
         )
+
+    # Per-layer dispatch for models with heterogeneous head dimensions
+    # (e.g., Gemma 4: SWA layers head_dim=256, full-attention layers head_dim=512).
+    # Non-Triton backends (FA3, FlashInfer, etc.) may not support the larger
+    # head_dim, so we wrap them with a Triton fallback for those layers.
+    if _has_heterogeneous_head_dim(runner) and not _is_triton_backend(
+        full_attn_backend
+    ):
+        return _wrap_heterogeneous_head_dim(runner, full_attn_backend)
 
     return full_attn_backend
 

@@ -90,6 +90,9 @@ class SWAKVPool(KVCache):
             self.layers_mapping[global_layer_id] = (swa_layer_id, True)
         self.full_to_swa_index_mapping: Optional[torch.Tensor] = None
 
+        self.layer_num = self.swa_layer_nums + self.full_layer_nums
+        self.store_dtype = self.full_kv_pool.store_dtype
+
         k_size, v_size = self.get_kv_size_bytes()
         self.mem_usage = (k_size + v_size) / GB
         logger.info(
@@ -98,6 +101,10 @@ class SWAKVPool(KVCache):
 
     def register_mapping(self, full_to_swa_index_mapping: torch.Tensor):
         self.full_to_swa_index_mapping = full_to_swa_index_mapping
+
+    def register_layer_transfer_counter(self, counter):
+        self.full_kv_pool.register_layer_transfer_counter(counter)
+        self.swa_kv_pool.register_layer_transfer_counter(counter)
 
     def get_kv_size_bytes(self):
         k_size, v_size = self.full_kv_pool.get_kv_size_bytes()
@@ -347,7 +354,6 @@ class SWATokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         return self._kvcache.translate_loc_from_full_to_swa(kv_indices)
 
     def alloc(self, need_size: int):
-        assert self.page_size == 1
         if need_size > self.full_attn_allocator.available_size():
             return None
         if need_size > self.swa_attn_allocator.available_size():

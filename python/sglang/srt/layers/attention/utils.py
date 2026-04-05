@@ -1391,3 +1391,35 @@ def fused_qk_rope_reshape_and_cache(
     if zeros_out is not None:
         return q_out.view(-1, qh * d), k_out, key_cache, value_cache, zeros_out
     return q_out.view(-1, qh * d), k_out, key_cache, value_cache
+
+
+def get_triton_backend(attn_backend):
+    """Resolve wrapper backends to find the first TritonAttnBackend instance.
+
+    Traverses nested wrappers (HybridAttnBackend, HybridHeadDimAttnBackend,
+    HybridLinearAttnBackend) and returns the first TritonAttnBackend found,
+    or ``None``.  The *prefill_backend* and *fallback_backend* attributes are
+    checked first so that the backend used during extend/prefill is preferred.
+    """
+    from sglang.srt.layers.attention.triton_backend import TritonAttnBackend
+
+    if isinstance(attn_backend, TritonAttnBackend):
+        return attn_backend
+    for attr in (
+        "prefill_backend",
+        "fallback_backend",
+        "decode_backend",
+        "primary_backend",
+        "full_attn_backend",
+    ):
+        sub = getattr(attn_backend, attr, None)
+        if sub is not None:
+            result = get_triton_backend(sub)
+            if result is not None:
+                return result
+    return None
+
+
+def has_triton_backend(attn_backend) -> bool:
+    """Return True if *attn_backend* (or any sub-backend) is a TritonAttnBackend."""
+    return get_triton_backend(attn_backend) is not None
