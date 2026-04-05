@@ -428,21 +428,21 @@ RUN curl --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 -sSf https://just.
     sed "s|https://github.com|https://${GITHUB_ARTIFACTORY}|g" | \
     bash -s -- --tag 1.42.4 --to /usr/local/bin
 
-# Add yank script
-COPY --chown=root:root --chmod=755 docker/configs/yank /usr/local/bin/yank
+# # Add yank script
+# COPY --chown=root:root --chmod=755 docker/configs/yank /usr/local/bin/yank
 
-# Install oh-my-zsh and plugins
-RUN sh -c "$(curl --retry 3 --retry-delay 2 -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended \
-    && git clone --depth 1 https://github.com/zsh-users/zsh-autosuggestions ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-autosuggestions \
-    && git clone --depth 1 https://github.com/zsh-users/zsh-syntax-highlighting.git ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting
+# # Install oh-my-zsh and plugins
+# RUN sh -c "$(curl --retry 3 --retry-delay 2 -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended \
+#     && git clone --depth 1 https://github.com/zsh-users/zsh-autosuggestions ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-autosuggestions \
+#     && git clone --depth 1 https://github.com/zsh-users/zsh-syntax-highlighting.git ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting
 
-# These configs are optional; users can override them by mounting their own files
-COPY docker/configs/opt/.vimrc /opt/sglang/.vimrc
-COPY docker/configs/opt/.tmux.conf /opt/sglang/.tmux.conf
-COPY docker/configs/opt/.gitconfig /opt/sglang/.gitconfig
+# # These configs are optional; users can override them by mounting their own files
+# COPY docker/configs/opt/.vimrc /opt/sglang/.vimrc
+# COPY docker/configs/opt/.tmux.conf /opt/sglang/.tmux.conf
+# COPY docker/configs/opt/.gitconfig /opt/sglang/.gitconfig
 
-# Configure development environment
-COPY docker/configs/.zshrc /root/.zshrc
+# # Configure development environment
+# COPY docker/configs/.zshrc /root/.zshrc
 
 # Fix Triton to use system ptxas for Blackwell (sm_103a) support (CUDA 13+ only)
 RUN if [ "${CUDA_VERSION%%.*}" = "13" ] && [ -d /usr/local/lib/python3.12/dist-packages/triton/backends/nvidia/bin ]; then \
