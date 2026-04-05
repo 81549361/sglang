@@ -1,5 +1,5 @@
 ARG CUDA_VERSION=12.9.1
-FROM i8s793vt.mirror.aliyuncs.com/nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu24.04 AS base
+FROM docker.m.daocloud.io/nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu24.04 AS base
 
 ARG TARGETARCH
 ARG BUILD_TYPE=all
