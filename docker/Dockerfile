@@ -473,7 +473,7 @@ WORKDIR /sgl-workspace/sglang
 # - Ready-to-run inference server environment
 #
 # Note: Uses devel base for complete NVCC toolchain required by DeepGEMM JIT
-FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu24.04 AS runtime
+FROM docker.1panel.live/nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu24.04 AS runtime
 
 ARG CUDA_VERSION
 ARG TARGETARCH
