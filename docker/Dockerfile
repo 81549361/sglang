@@ -187,7 +187,7 @@ RUN if [ "$BRANCH_TYPE" = "local" ]; then \
     elif [ -z "$SGL_VERSION" ]; then \
         echo "ERROR: SGL_VERSION must be set when USE_LATEST_SGLANG=0 and BRANCH_TYPE!=local" && exit 1; \
     else \
-        git clone --depth=1 --branch v${SGL_VERSION} https://github.com/81549361/sglang.git /sgl-workspace/sglang; \
+        git clone --depth=1 --branch ${SGL_VERSION} https://github.com/81549361/sglang.git /sgl-workspace/sglang; \
     fi \
     && rm -rf /tmp/local_src
 
