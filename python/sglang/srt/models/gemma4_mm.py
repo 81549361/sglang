@@ -222,6 +222,7 @@ class Gemma4ForConditionalGeneration(PreTrainedModel):
 
         # Create logits processor for the multimodal model
         self.logits_processor = LogitsProcessor(config.text_config)
+        self.capture_aux_hidden_states = False
 
         self.post_init()
 
@@ -571,13 +572,37 @@ class Gemma4ForConditionalGeneration(PreTrainedModel):
             **kwargs,
         )
 
+        aux_hidden_states = None
+        if self.capture_aux_hidden_states:
+            hidden_states, aux_hidden_states = hidden_states
+
         # Process hidden states through logits processor
         return self.logits_processor(
-            input_ids, hidden_states, self.language_model.embed_tokens, forward_batch
+            input_ids, hidden_states, self.language_model.embed_tokens, forward_batch,
+            aux_hidden_states,
         )
 
     def tie_weights(self, recompute_mapping=False):
         return self.language_model.tie_weights()
+
+    def set_eagle3_layers_to_capture(self, layer_ids: Optional[List[int]] = None):
+        self.capture_aux_hidden_states = True
+        if layer_ids is None:
+            num_layers = self.config.text_config.num_hidden_layers
+            self.language_model.layers_to_capture = [
+                2,
+                num_layers // 2,
+                num_layers - 3,
+            ]
+        else:
+            self.language_model.layers_to_capture = [val + 1 for val in layer_ids]
+
+    def get_embed_and_head(self):
+        return self.language_model.embed_tokens.weight, self.language_model.embed_tokens.weight
+
+    def set_embed_and_head(self, embed, head):
+        del self.language_model.embed_tokens.weight
+        self.language_model.embed_tokens.weight = embed
 
     # Standard stacked-params mapping for fused QKV / GateUp linears
     # in the text decoder.  Also consumed by the tower QKV remap (step 2).

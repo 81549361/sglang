@@ -401,8 +401,12 @@ class LlamaModel(nn.Module):
                     "residual": residual,
                 }
             )
-        else:
-            hidden_states, _ = self.norm(hidden_states, residual)
+
+        # Capture the output of the last layer if requested
+        if self.end_layer in self.layers_to_capture:
+            aux_hidden_states.append(hidden_states + residual)
+
+        hidden_states, _ = self.norm(hidden_states, residual)
 
         if len(aux_hidden_states) == 0:
             return hidden_states

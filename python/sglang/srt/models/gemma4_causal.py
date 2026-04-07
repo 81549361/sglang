@@ -14,7 +14,7 @@
 
 import logging
 import re
-from typing import Iterable, Optional, Set, Tuple
+from typing import Iterable, List, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
@@ -662,6 +662,7 @@ class Gemma4TextModel(PreTrainedModel):
         )
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.layers_to_capture = []
         self.post_init()
 
     def get_input_embeddings(self) -> nn.Embedding:
@@ -759,7 +760,10 @@ class Gemma4TextModel(PreTrainedModel):
 
         hidden_states = input_embeds
 
+        aux_hidden_states = []
         for layer_idx, layer in enumerate(self.layers):
+            if layer_idx in self.layers_to_capture:
+                aux_hidden_states.append(hidden_states)
             if per_layer_inputs is not None:
                 per_layer_input = per_layer_inputs[:, layer_idx, :]
             else:
@@ -774,11 +778,20 @@ class Gemma4TextModel(PreTrainedModel):
             hidden_states = layer_outputs[0]
             residual = layer_outputs[1] if len(layer_outputs) > 1 else None
 
+        # Capture the output of the last layer if requested
+        # (layer_idx = len(self.layers) means we want the output after the last layer)
+        if len(self.layers) in self.layers_to_capture:
+            aux_hidden_states.append(hidden_states)
+
         if residual is None:
             hidden_states = self.norm(hidden_states)
         else:
             hidden_states, _ = self.norm(hidden_states, residual)
-        return hidden_states
+
+        if len(aux_hidden_states) == 0:
+            return hidden_states
+
+        return hidden_states, aux_hidden_states
 
 
 class Gemma4ForCausalLM(PreTrainedModel):
@@ -836,6 +849,7 @@ class Gemma4ForCausalLM(PreTrainedModel):
             config=config, quant_config=quant_config, prefix=add_prefix("model", prefix)
         )
         self.logits_processor = LogitsProcessor(config)
+        self.capture_aux_hidden_states = False
 
         if self.config.tie_word_embeddings:
             self.lm_head = self.model.embed_tokens
@@ -875,9 +889,36 @@ class Gemma4ForCausalLM(PreTrainedModel):
             per_layer_inputs,
             **kwargs,
         )
+
+        aux_hidden_states = None
+        if self.capture_aux_hidden_states:
+            hidden_states, aux_hidden_states = hidden_states
+
         return self.logits_processor(
-            input_ids, hidden_states, self.lm_head, forward_batch
+            input_ids, hidden_states, self.lm_head, forward_batch,
+            aux_hidden_states,
         )
+
+    def set_eagle3_layers_to_capture(self, layer_ids: Optional[List[int]] = None):
+        self.capture_aux_hidden_states = True
+        if layer_ids is None:
+            num_layers = self.config.num_hidden_layers
+            self.model.layers_to_capture = [2, num_layers // 2, num_layers - 3]
+        else:
+            self.model.layers_to_capture = [val + 1 for val in layer_ids]
+
+    def get_embed_and_head(self):
+        return self.model.embed_tokens.weight, self.lm_head.weight
+
+    def set_embed_and_head(self, embed, head):
+        del self.model.embed_tokens.weight
+        self.model.embed_tokens.weight = embed
+        if self.config.tie_word_embeddings:
+            self.lm_head = self.model.embed_tokens
+        else:
+            del self.lm_head.weight
+            self.lm_head.weight = head
+        torch.cuda.empty_cache()
 
     def _get_k_eq_v_layers(self) -> set:
         """Return set of layer indices where attention_k_eq_v applies (full-attention layers)."""

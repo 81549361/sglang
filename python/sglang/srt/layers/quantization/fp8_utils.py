@@ -1494,7 +1494,12 @@ def apply_fp8_linear(
             # Massage the input to be 2D
             qinput = qinput.view(-1, qinput.shape[-1])
             output = triton_scaled_mm(
-                qinput, weight, x_scale, weight_scale, input.dtype, bias
+                qinput,
+                weight,
+                x_scale,
+                weight_scale.reshape(-1, 1),
+                input.dtype,
+                bias,
             )
         else:
             output = fp8_scaled_mm(
